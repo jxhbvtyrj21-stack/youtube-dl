@@ -333,3 +333,37 @@ def test_fail_job_policy(dirs, engine_ctx):
     job = run_batch(eng, dirs)["strict"]
     assert job.status is JobStatus.FAILED and job.error.code == "INVALID_IMAGES"
     assert "№2" in job.error.message
+
+
+def test_missing_input_folder(dirs, engine_ctx):
+    eng, events = make_engine(dirs)
+    engine_ctx["eng"] = eng
+    assert eng.start_batch(start_cmd(dirs["input"] / "немає такої", dirs["output"], dirs["ws"])) is None
+    errs = events.of(ev.EngineError)
+    assert errs and "Вхідну папку не знайдено" in errs[-1].message
+    assert eng.batch_state is BatchState.IDLE
+
+
+def test_empty_input_folder(dirs, engine_ctx):
+    eng, events = make_engine(dirs)
+    engine_ctx["eng"] = eng
+    assert eng.start_batch(start_cmd(dirs["input"], dirs["output"], dirs["ws"])) is None
+    assert "не знайдено матеріалів" in events.of(ev.EngineError)[-1].message
+
+
+def test_input_file_vanishes_after_discovery(dirs, engine_ctx, monkeypatch):
+    """An image deleted between discovery and processing is reported, not fatal."""
+    from videogen.core import engine as engine_mod
+    d = make_job_folder(dirs["input"], "gone", n_images=3, audio_s=2)
+    real = engine_mod.discover
+
+    def discover_then_delete(*a, **k):
+        res = real(*a, **k)
+        (d / "img_002.png").unlink()
+        return res
+    monkeypatch.setattr(engine_mod, "discover", discover_then_delete)
+    eng, events = make_engine(dirs)
+    engine_ctx["eng"] = eng
+    job = run_batch(eng, dirs)["gone"]
+    assert job.status is JobStatus.PARTIAL
+    assert any(e.index == 2 for e in events.of(ev.ImageSkipped))

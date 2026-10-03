@@ -141,7 +141,8 @@ def discover(input_dir: Path, mode: Mode) -> list[DiscoveredJob]:
             if e.is_dir(follow_symlinks=False) and not e.name.startswith((".", "_")):
                 subdirs.append(Path(e.path))
     if not subdirs:
-        return [classify_folder(input_dir, mode)]
+        job = classify_folder(input_dir, mode)
+        return [job] if job.file_count > 0 or job.problems and "прочитати" in job.problems[0] else []
     jobs = [classify_folder(d, mode) for d in sorted(subdirs, key=lambda p: natural_sort_key(p.name))]
     # sub-folders without any files (e.g. an empty "archive" folder) are not jobs
     return [j for j in jobs if j.file_count > 0]
