@@ -124,26 +124,35 @@
 
 ---
 
-## PHASE 4 — FFmpeg ⬜
+## PHASE 4 — FFmpeg ✅
 
 | Файл | Зміст |
 |---|---|
-| `ffmpeg_ctl/process_manager.py` | + Windows Job Objects (ctypes, kill-on-close), реєстр живих PID |
-| `ffmpeg_ctl/runner.py` | + §8.2: `-progress pipe:1`, graceful `q` через stdin, інтеграція з watchdog |
-| `ffmpeg_ctl/progress.py` | §8.3 |
-| `workers/watchdog.py` | §7 |
-| `workers/resource_monitor.py` | §9.1 |
+| `ffmpeg_ctl/progress.py` | розбір `-progress pipe:1`: frame, fps, out_time, speed, total_size, end; стійкий до `N/A` і сміття |
+| `workers/watchdog.py` | окремо «процес живий» і «процес просувається»: hard timeout, stall (без прогресу і без CPU), livelock (CPU є, прогресу немає 2×stall) |
+| `ffmpeg_ctl/runner.py` (`run_ffmpeg`) | FFmpeg під watchdog: прогрес у реальному часі, ескалація `q` → terminate → kill дерева → перевірка, видалення пошкодженого виходу, diagnostic snapshot, `raise_for()` → таксономія помилок |
+| `ffmpeg_ctl/process_manager.py` | Windows Job Objects (ctypes, `KILL_ON_JOB_CLOSE`), `ProcessRegistry` усіх живих дочірніх процесів, безпечне вбивство дерева на POSIX |
+| `workers/resource_monitor.py` | RAM / RSS дерева / CPU / вільне місце; оцінка потрібного місця перед job і зрозуміла помилка «Недостатньо вільного місця на диску» |
+| `tests/fake_ffmpeg.py` | імітатор FFmpeg: норма, зависання 0 % CPU, livelock 100 % CPU, падіння, онук-процес, ігнорування `q` і SIGTERM, 50 МБ stderr, ріст файлу без прогресу |
 
-Ворота — використовується `tests/fake_ffmpeg.py` (скрипт, що імітує FFmpeg:
-нормальну роботу з progress, зависання з 0 % CPU, livelock 100 % CPU,
-аварію з кодом 1, породження дочірнього процесу, ігнорування `q` і SIGTERM,
-переповнення stderr 50 МБ):
-* hard timeout і stall виявляються в межах `timeout + 1 с`;
-* ескалація graceful → terminate → kill tree; після неї жодного живого PID;
-* дочірній процес fake-FFmpeg також вбитий;
-* stderr 50 МБ не спричиняє deadlock, пам'ять обмежена хвостом;
-* `FFmpegUnavailableError` при відсутньому бінарнику;
-* парсер прогресу: `N/A`, обрізані блоки, `progress=end`.
+Ворота пройдено (+24 тести, плюс глобальна перевірка процесів-сиріт
+наприкінці кожного прогону):
+* зависання (0 % CPU) → stall за ~1 с; livelock (100 % CPU без кадрів) → виявлено;
+* hard timeout спрацьовує навіть при постійному прогресі;
+* онук-процес вбивається разом із деревом; процес, що ігнорує `q` і SIGTERM, — теж;
+* спочатку пробується м'яке завершення `q` (перевірено кодом виходу);
+* скасування — менш ніж за 5 с, з видаленням незавершеного файлу;
+* 50 МБ у stderr без взаємоблокування; ріст файлу без блоків прогресу не
+  вважається зависанням;
+* справжній FFmpeg: монотонний прогрес до 150/150 кадрів; скасування посеред
+  кодування — процес зник, файл видалено;
+* реєстр процесів порожній після кожного тесту; жодного дочірнього процесу
+  наприкінці сесії тестів.
+
+**Обмеження:** код Windows Job Objects написано за документацією WinAPI, але
+в цьому Linux-середовищі його неможливо виконати. Він буде перевірений у
+CI-збірці на `windows-latest` (PHASE 9). До цього на Windows діє запасний
+механізм — psutil-вбивство дерева, перевірене тут.
 
 ---
 

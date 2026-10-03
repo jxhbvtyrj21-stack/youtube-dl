@@ -32,7 +32,7 @@ from videogen.core import timeouts
 from videogen.core.cancellation import CancellationToken
 from videogen.core.errors import JobCancelledError
 from videogen.core.models import ImageItem, ImageStatus
-from videogen.ffmpeg_ctl.process_manager import kill_tree
+from videogen.ffmpeg_ctl.process_manager import REGISTRY, kill_tree
 
 log = logging.getLogger(__name__)
 
@@ -250,6 +250,7 @@ class ImageWorkerClient:
         child_conn.close()
         self._proc, self._conn, self._served = proc, parent_conn, 0
         self.pids.append(proc.pid)
+        REGISTRY.add(proc.pid, "ImageWorker")
 
     def _kill(self, reason: str, *, count_restart: bool = True) -> None:
         proc, conn = self._proc, self._conn
@@ -262,6 +263,7 @@ class ImageWorkerClient:
                             extra={"event": "worker_kill"})
                 kill_tree(proc.pid, wait_s=5.0)
             proc.join(timeout=5.0)
+            REGISTRY.remove(proc.pid)
             try:
                 proc.close()
             except ValueError:
