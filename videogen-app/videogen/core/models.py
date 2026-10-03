@@ -209,6 +209,9 @@ class ImageItem:
     has_alpha: bool = False
     decoder: str = ""
     decoders_tried: list[str] = field(default_factory=list)
+    #: decoded by a fallback decoder after the primary one reported damaged
+    #: data: usable, but may contain artefacts -> job is PARTIAL (degraded)
+    recovered: bool = False
     normalized_path: str = ""
     reason_code: str = ""
     message: str = ""

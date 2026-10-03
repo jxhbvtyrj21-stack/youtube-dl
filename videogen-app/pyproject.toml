@@ -24,7 +24,7 @@ include = ["videogen*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
-addopts = "-ra"
+addopts = "-ra -m 'not stress'"
 markers = [
     "slow: long-running tests",
     "stress: stress tests (run explicitly)",
