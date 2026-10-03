@@ -314,6 +314,12 @@ class StateManager:
             skipped_images=skipped,
         )
 
+    def batch_dirs(self) -> list[tuple[str, str, str]]:
+        """(batch_id, output_dir, workspace_dir) for every batch."""
+        with self._lock:
+            return [(r[0], r[1], r[2]) for r in self._conn.execute(
+                "SELECT batch_id, output_dir, workspace_dir FROM batches ORDER BY created_at")]
+
     def successful_outputs(self) -> set[str]:
         with self._lock:
             rows = self._conn.execute(

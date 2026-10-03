@@ -25,6 +25,8 @@ from videogen.core.state_manager import StateManager
 
 log = logging.getLogger(__name__)
 
+MAX_JOBS_PER_BATCH = 1_000_000
+
 
 @dataclass(frozen=True)
 class ResourceStatus:
@@ -188,8 +190,19 @@ class QueueManager:
                                 "" if ok else status.message)
         return ok
 
+    def enqueue(self, job_ids: Sequence[str]) -> bool:
+        """Append jobs to a running batch. Returns False if the batch is not
+        running (caller should start a new batch instead)."""
+        with self._lock:
+            if self._batch_state in (BatchState.IDLE, BatchState.STOPPING, BatchState.STOPPED,
+                                     BatchState.COMPLETED) or self._batch_token.cancelled:
+                return False
+            self._pending.extend(job_ids)
+            return True
+
     def _slot(self) -> None:
-        for _ in range(len(self._pending) + 1):
+        # bounded: each iteration consumes one job; _next_job() returns None when empty
+        for _ in range(MAX_JOBS_PER_BATCH):
             try:
                 self._pause.checkpoint(self._batch_token)
             except JobCancelledError:

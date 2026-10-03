@@ -55,7 +55,8 @@ class JobContext:
         """Record the stage *before* doing its work (write-ahead)."""
         self.token.raise_if_cancelled()
         self.state.set_stage(self.job_id, stage)
-        log.info("stage", extra={"job_id": self.job_id, "stage": stage.value, "event": "stage_start"})
+        log.info("stage %s", stage.value, extra={"job_id": self.job_id, "stage": stage.value,
+                                                  "event": "stage_start"})
         if self.on_stage is not None:
             self.on_stage(self.job_id, stage, self.attempt)
 

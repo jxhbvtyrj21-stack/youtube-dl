@@ -7,6 +7,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -74,3 +75,54 @@ def memory_snapshot(pid: int | None = None) -> MemorySnapshot:
         pass  # invariant-ok: process tree changed while iterating; rss is enough
     mb = 1024 * 1024
     return MemorySnapshot(vm.available / mb, vm.total / mb, vm.percent, rss / mb, tree / mb)
+
+
+class InstanceLock:
+    """Exclusive lock on the app-data folder: only one Engine may own the
+    state database. Released automatically by the OS if the process dies
+    (so a crash never leaves a stale lock)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._fh: Any = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(self.path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        try:   # informational only (pid of the owner)
+            fh.seek(0)
+            fh.truncate()
+            fh.write(str(os.getpid()).encode())
+            fh.flush()
+        except OSError:
+            pass  # invariant-ok: the lock itself is what matters
+        self._fh = fh
+        return True
+
+    def release(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass  # invariant-ok: closing the file releases the lock anyway
+        finally:
+            fh.close()

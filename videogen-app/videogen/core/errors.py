@@ -87,6 +87,11 @@ class ArchiveError(VideoGenError):
     default_code = "ARCHIVE_FAILED"
 
 
+class AlreadyRunningError(VideoGenError):
+    error_class = ErrorClass.INTERNAL
+    default_code = "ALREADY_RUNNING"
+
+
 class JobCancelledError(VideoGenError):
     error_class = ErrorClass.CANCELLED
     default_code = "CANCELLED"
