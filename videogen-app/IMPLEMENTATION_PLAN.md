@@ -24,30 +24,50 @@
 
 ---
 
-## PHASE 2 — Core ⬜
+## PHASE 2 — Core ✅
 
 | Файл | Зміст |
 |---|---|
-| `core/models.py` | `JobStatus`, `Stage`, `BatchState`, `ImageStatus` (Enum); `JobConfig`, `JobState`, `ImageItem`, `MediaInfo`, `Timeline`, `SegmentInfo`, `RenderResult`, `ProcessResult` (frozen dataclass); таблиця дозволених переходів |
-| `core/errors.py` | Ієрархія помилок §11, `ErrorClass`, `retry_budget(cls)`, `UserMessage` |
-| `core/events.py` | Команди та події §3.1 |
-| `core/state_manager.py` | SQLite (WAL, `synchronous=FULL`), схема + міграції, `transition()` з перевіркою, `mark_running_as_interrupted()`, `pending_cleanup` |
-| `core/job_manager.py` | Життєвий цикл job, ітеративний retry, класифікація |
-| `core/queue_manager.py` | Черга, PAUSE/RESUME/STOP/CANCEL, RESOURCE_WAIT, concurrency слотів |
+| `core/models.py` | `JobStatus` (з **PARTIAL**), `Stage`, `BatchState`, `ImageStatus`, `Mode`, `Orientation`; `JobConfig`, `JobState`, `ImageItem`, `MediaInfo`, `ProcessResult`, `RenderResult`, `ErrorInfo`; таблиці переходів job і batch |
+| `core/errors.py` | ієрархія помилок §11, `retry_budget()`, `classify()` |
+| `core/events.py` | типізовані команди GUI→Engine і події Engine→GUI |
+| `core/state_manager.py` | SQLite (WAL, `synchronous=FULL`), `transition()` з перевіркою в транзакції, recovery `RUNNING/RETRY_PENDING → INTERRUPTED`, карантин пошкодженої БД, `pending_cleanup` |
+| `core/cancellation.py` | `CancellationToken` (з callback-ами для вбивства процесів), `PauseGate` (пауза між атомарними операціями) |
+| `core/job_manager.py` | ітеративний retry з бюджетом на клас помилки, абсолютна межа спроб між перезапусками (`HARD_ATTEMPT_CAP`), `finalize` завжди в `finally` |
+| `core/queue_manager.py` | слоти паралельності, PAUSE/RESUME/STOP/CANCEL CURRENT, RESOURCE_WAIT з верхньою межею, автопауза при нестачі диска |
+| `core/timeouts.py` | формули timeout §7.2 |
 | `storage/atomic.py`, `manifest.py`, `workspace.py`, `cleanup.py` | §10, §15, §20 |
-| `applog/logger.py`, `diagnostics.py` | §13 |
-| `config/settings.py`, `defaults.py` | §19 |
+| `applog/logger.py`, `diagnostics.py` | §13: один слухач на всі процеси, ротація, JSONL-журнал job |
+| `config/settings.py` | §19: значення за замовчуванням, межі кожного поля, безпечне завантаження |
 | `utils/paths.py`, `hashing.py`, `system.py` | §22 |
 
-Ворота (unit):
-* таблиця переходів: кожен дозволений проходить, кожен недозволений — `IllegalTransition`;
-* `RUNNING → INTERRUPTED` при «перезапуску» (повторне відкриття БД);
-* атомарний запис manifest: симуляція збою між `write` і `replace` — старий файл цілий;
-* cleanup: заблокований файл (відкритий хендл), read-only файл, відмова видаляти шлях поза workspace;
-* ротація логів: 3 файли при перевищенні ліміту; запис з кількох процесів;
-* безпечні імена: Unicode, `&#%+'()`, `CON`, 300 символів;
-* retry: для кожного класу помилки кількість спроб = бюджет; немає рекурсії;
-* AST-тест інваріантів (§18).
+`config/defaults.py` не створювався: значення за замовчуванням і допустимі
+межі визначені поруч із кожним полем у `settings.py` (одне джерело істини).
+
+Ворота пройдено: **257 тестів** (`python -m pytest tests`), три прогони поспіль
+без жодного нестабільного результату:
+* таблиці переходів job і batch перевірено повністю (усі пари станів);
+* `RUNNING → INTERRUPTED` після «перезапуску»; **реальне вбивство процесу**
+  (`SIGKILL`) посеред тисяч записів у БД — база цілісна, стан відновлюється;
+* атомарний запис: симуляція збою перед `rename` — старий файл цілий;
+* cleanup: заблокований файл, read-only файл, «завислий» диск (дедлайн),
+  відмова видаляти шлях поза workspace;
+* ротація логів, запис з кількох процесів через один слухач, JSONL-журнал job;
+* безпечні імена: Unicode, `&#%+'()`, `CON`, довгі імена;
+* retry: для кожного класу помилки кількість спроб = бюджет ТЗ §20;
+* batch: 100 jobs із 3 помилками → 97 + 3; STOP, CANCEL CURRENT, PAUSE/RESUME,
+  нестача ресурсів, нестача диска, паралельні слоти;
+* 1000 jobs без витоку потоків; без витоку файлових дескрипторів;
+* AST-аудит інваріантів (§18) по всьому пакету.
+
+Знайдені й виправлені під час фази вади:
+1. ім'я тимчасового файлу при атомарному записі могло перевищити ліміт
+   довжини імені, навіть коли цільове ім'я вміщалося;
+2. файл налаштувань у невалідному UTF-8 спричиняв виняток;
+3. гонка в журналі job: файл міг закритися до запису останніх повідомлень
+   (тепер відкриття/закриття проходять через ту саму чергу, що й записи);
+4. PAUSE, натиснутий під час очікування ресурсів, не зупиняв запуск
+   наступного job.
 
 ---
 
