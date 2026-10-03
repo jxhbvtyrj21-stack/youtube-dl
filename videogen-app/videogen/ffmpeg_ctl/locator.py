@@ -36,7 +36,8 @@ def _candidates(explicit_dir: str | None) -> list[Path]:
             dirs.append(Path(d))
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
-        dirs += [base / "ffmpeg", base]
+        bundle = Path(getattr(sys, "_MEIPASS", base))      # PyInstaller 6: <app>/_internal
+        dirs += [bundle / "ffmpeg", base / "ffmpeg", base]
     return dirs
 
 

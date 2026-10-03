@@ -1,0 +1,79 @@
+name: VideoGen (Windows)
+
+on:
+  push:
+    paths:
+      - "videogen-app/**"
+      - ".github/workflows/videogen-windows.yml"
+  pull_request:
+    paths:
+      - "videogen-app/**"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: videogen-app
+    shell: pwsh
+
+jobs:
+  tests:
+    name: Tests on Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -e ".[media,gui,dev]"
+      - name: Fetch FFmpeg
+        run: |
+          ./packaging/fetch_ffmpeg.ps1
+          "$PWD\packaging\third_party\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Run tests
+        env:
+          VIDEOGEN_FFMPEG_DIR: ${{ github.workspace }}\videogen-app\packaging\third_party\ffmpeg
+        run: python -m pytest -q -ra --timeout=300
+
+  build:
+    name: Build EXE and self-test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -e ".[media,gui]" "pyinstaller>=6.6"
+      - name: Fetch FFmpeg
+        run: ./packaging/fetch_ffmpeg.ps1
+      - name: Build (PyInstaller onedir)
+        run: pyinstaller packaging/videogen.spec --noconfirm --clean
+      - name: Self-test of the packaged build (bundled FFmpeg only)
+        run: |
+          $env:PATH = "C:\Windows\System32;C:\Windows"      # make sure nothing but the bundle provides ffmpeg
+          .\dist\VideoGen\VideoGen-cli.exe --selftest "$env:RUNNER_TEMP\selftest"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: GUI smoke test (start, engine up, clean close)
+        env:
+          VIDEOGEN_SMOKE_EXIT_MS: "8000"
+          VIDEOGEN_APPDATA: ${{ runner.temp }}\smoke-appdata
+        run: |
+          $p = Start-Process .\dist\VideoGen\VideoGen.exe -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "GUI did not exit" }
+          Start-Sleep -Seconds 2
+          $left = Get-Process | Where-Object { $_.ProcessName -match '^(VideoGen|ffmpeg|ffprobe)' }
+          if ($left) { $left | Format-Table; throw "processes left behind" }
+          if (-not (Test-Path "$env:VIDEOGEN_APPDATA\logs\application.log")) { throw "no log written" }
+          Get-Content "$env:VIDEOGEN_APPDATA\logs\application.log" -Tail 20
+      - name: Package
+        run: |
+          $v = (.\dist\VideoGen\VideoGen-cli.exe --version)
+          Compress-Archive -Path dist\VideoGen -DestinationPath "dist\VideoGen-$v-win64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoGen-win64
+          path: videogen-app/dist/VideoGen-*-win64.zip
+          retention-days: 14

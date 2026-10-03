@@ -173,3 +173,10 @@ def test_settings_json_is_utf8_and_human_readable(tmp_path):
     save_settings(Settings(), p)
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["video"]["fps"] == 30
+
+
+def test_settings_roundtrip_through_dict_without_warnings():
+    """GUI -> Engine passes Settings.to_dict() (tuples, not lists)."""
+    s = Settings()
+    back, warnings = settings_from_dict(s.to_dict())
+    assert back == s and warnings == []

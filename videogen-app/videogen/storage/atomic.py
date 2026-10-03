@@ -53,7 +53,8 @@ def replace_with_retry(src: Path, dst: Path,
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
-    path = Path(path)
+    from videogen.utils.paths import long_path
+    path = Path(long_path(path))   # \\?\ prefix on Windows for paths beyond MAX_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     # Short fixed prefix: a temp name derived from the target could exceed the
     # file-name length limit even when the target itself fits.

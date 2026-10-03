@@ -222,7 +222,7 @@ def _coerce_leaf(f: dataclasses.Field[Any], default: Any, raw: Any, where: str,
             warnings.append(f"{where}: рядок задовгий")
             return default
     elif isinstance(default, tuple):
-        if not isinstance(raw, list) or not all(
+        if not isinstance(raw, (list, tuple)) or not all(
                 isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 3600
                 for x in raw) or len(raw) > 10:
             warnings.append(f"{where}: некоректний список {raw!r}")

@@ -35,7 +35,18 @@ def main() -> int:
     return app.exec()
 
 
+def entry() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        from videogen.selftest import run
+        return run(sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) > 1 and sys.argv[1] == "--version":
+        from videogen import __version__
+        print(__version__)
+        return 0
+    return main()
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     multiprocessing.set_start_method("spawn", force=True)
-    sys.exit(main())
+    sys.exit(entry())
