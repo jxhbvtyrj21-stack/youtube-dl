@@ -244,8 +244,10 @@ class LogSystem:
             except Exception:  # noqa: BLE001
                 pass  # invariant-ok: closing handlers at shutdown is best effort
         try:
+            # never block process exit on undelivered log records (a dead
+            # reader would make join_thread() wait forever)
+            self.queue.cancel_join_thread()
             self.queue.close()
-            self.queue.join_thread()
         except (OSError, ValueError, AttributeError):
             pass  # invariant-ok: queue already closed
         self._installed = False

@@ -24,6 +24,7 @@ from pathlib import Path
 from videogen.core.models import (
     ErrorInfo, JobConfig, JobState, JobStatus, Stage, check_transition,
 )
+from videogen.storage.atomic import replace_with_retry
 from videogen.storage.manifest import utc_now
 
 log = logging.getLogger(__name__)
@@ -101,10 +102,15 @@ class StateManager:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10.0, isolation_level=None,
                                check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=FULL")
-        conn.execute("PRAGMA busy_timeout=10000")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA busy_timeout=10000")
+        except BaseException:
+            # On Windows an open handle would prevent quarantining the file
+            conn.close()
+            raise
         return conn
 
     def _open(self) -> sqlite3.Connection:
@@ -127,7 +133,7 @@ class StateManager:
             for suffix in ("", "-wal", "-shm"):
                 src = Path(str(self.db_path) + suffix)
                 if src.exists():
-                    src.replace(Path(str(corrupt) + suffix))
+                    replace_with_retry(src, Path(str(corrupt) + suffix))
             self.open_report = OpenReport(True, str(corrupt))
             conn = self._connect()
             conn.executescript(_SCHEMA)

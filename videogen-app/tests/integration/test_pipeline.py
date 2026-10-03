@@ -109,7 +109,7 @@ def test_bad_images_give_partial_not_success(dirs, engine_ctx):
     assert sorted(e.index for e in skipped) == [2, 4]
     log_text = (dirs["appdata"] / "logs" / "application.log").read_text(encoding="utf-8")
     assert "Не вдалося використати зображення №2" in log_text
-    diag = json.loads((dirs["appdata"] / "diagnostics" / job.job_id / "manifest.json").read_text())
+    diag = json.loads((dirs["appdata"] / "diagnostics" / job.job_id / "manifest.json").read_text(encoding="utf-8"))
     assert diag["status"] == "PARTIAL"
     assert [i["status"] for i in diag["input_files"]].count("INVALID") == 2
     assert_clean(dirs)
@@ -231,7 +231,8 @@ def test_ffmpeg_hang_and_crash_are_bounded(dirs, engine_ctx, tmp_path, behaviour
         assert snaps, "a diagnostic snapshot must be written on stall"
 
 
-def test_ffmpeg_unavailable(dirs, engine_ctx):
+def test_ffmpeg_unavailable(dirs, engine_ctx, monkeypatch):
+    monkeypatch.delenv("VIDEOGEN_FFMPEG_DIR", raising=False)
     make_job_folder(dirs["input"], "x", n_images=2, audio_s=2)
     eng, events = make_engine(dirs, tools=None)
     engine_ctx["eng"] = eng

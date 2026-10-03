@@ -110,7 +110,7 @@ def test_snapshot_and_prune(tmp_path):
         p = write_snapshot(d, reason="stall", pid=os.getpid(), extra={"argv": ["ffmpeg", "-i", "x"]},
                            paths=[tmp_path])
         assert p is not None
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         assert data["reason"] == "stall" and data["process_tree"][0]["pid"] == os.getpid()
         t = time.time() - 100 + i
         os.utime(d, (t, t))

@@ -66,8 +66,16 @@ jobs:
           Start-Sleep -Seconds 2
           $left = Get-Process | Where-Object { $_.ProcessName -match '^(VideoGen|ffmpeg|ffprobe)' }
           if ($left) { $left | Format-Table; throw "processes left behind" }
-          if (-not (Test-Path "$env:VIDEOGEN_APPDATA\logs\application.log")) { throw "no log written" }
-          Get-Content "$env:VIDEOGEN_APPDATA\logs\application.log" -Tail 20
+          Get-ChildItem -Recurse $env:VIDEOGEN_APPDATA -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+          foreach ($f in @("crash.log", "logs\application.log", "logs\errors.log")) {
+            $p = Join-Path $env:VIDEOGEN_APPDATA $f
+            if (Test-Path $p) { "--- $f"; Get-Content $p -Tail 40 }
+          }
+          Get-ChildItem "$env:VIDEOGEN_APPDATA\logs\console-*.log" -ErrorAction SilentlyContinue | ForEach-Object { "--- $($_.Name)"; Get-Content $_ -Tail 40 }
+          if (Test-Path "$env:VIDEOGEN_APPDATA\crash.log") { throw "crash report written" }
+          if (-not (Select-String -Path "$env:VIDEOGEN_APPDATA\logs\application.log" -Pattern "engine started" -Quiet)) {
+            throw "engine process did not start"
+          }
       - name: Package
         run: |
           $v = (.\dist\VideoGen\VideoGen-cli.exe --version)

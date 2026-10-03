@@ -22,6 +22,11 @@ def main() -> int:
 
     appdata = app_data_dir()
     appdata.mkdir(parents=True, exist_ok=True)
+    from videogen.utils.system import write_crash_report
+
+    def _excepthook(tp, val, tb):  # type: ignore[no-untyped-def]
+        write_crash_report(appdata, "gui", val)
+    sys.excepthook = _excepthook
     settings, _warnings = load_settings(appdata / "settings.json")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

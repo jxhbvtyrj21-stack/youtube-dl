@@ -77,6 +77,37 @@ def memory_snapshot(pid: int | None = None) -> MemorySnapshot:
     return MemorySnapshot(vm.available / mb, vm.total / mb, vm.percent, rss / mb, tree / mb)
 
 
+def redirect_missing_std_streams(log_dir: Path) -> None:
+    """Windowed (console-less) EXE: sys.stdout/stderr are None, so any
+    traceback printed by Python or a library is lost — or crashes code that
+    writes to them. Send them to a file instead."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = open(log_dir / f"console-{os.getpid()}.log", "a", encoding="utf-8", buffering=1)
+    except OSError:
+        fh = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = fh
+    if sys.stderr is None:
+        sys.stderr = fh
+
+
+def write_crash_report(appdata: Path, where: str, exc: BaseException) -> Path | None:
+    """Last-resort crash file when the logging system itself is not up."""
+    import traceback
+    try:
+        appdata.mkdir(parents=True, exist_ok=True)
+        p = appdata / "crash.log"
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(f"\n=== {where} pid={os.getpid()} ===\n")
+            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        return p
+    except OSError:
+        return None
+
+
 class InstanceLock:
     """Exclusive lock on the app-data folder: only one Engine may own the
     state database. Released automatically by the OS if the process dies

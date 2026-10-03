@@ -13,7 +13,7 @@ from tests.pipeline_support import start_cmd  # noqa: E402
 
 def main() -> None:
     appdata, inp, out, ws, settings_file = sys.argv[1:6]
-    settings, _ = settings_from_dict(json.loads(Path(settings_file).read_text()))
+    settings, _ = settings_from_dict(json.loads(Path(settings_file).read_text(encoding="utf-8")))
     eng = Engine(Path(appdata), settings, lambda e: None)
     eng.startup()
     eng.start_batch(start_cmd(Path(inp), Path(out), Path(ws)))

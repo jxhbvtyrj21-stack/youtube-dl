@@ -131,3 +131,29 @@ def test_second_engine_on_same_data_is_refused(tmp_path):
         a.shutdown()
     b = Engine(tmp_path / "appdata", Settings(), lambda e: None, install_logging=False)   # lock released
     b.shutdown()
+
+
+def _engine_proc(cq, eq, appdata):
+    from videogen.config.settings import Settings
+    from videogen.engine_main import engine_main
+    engine_main(cq, eq, appdata, Settings().to_dict(), parent_pid=-1)
+
+
+def test_engine_exits_even_if_nobody_reads_events(tmp_path):
+    """GUI gone + full event pipe must not hang engine shutdown."""
+    import multiprocessing
+    from videogen.core import events as ev
+    ctx = multiprocessing.get_context("spawn")
+    cq, eq = ctx.Queue(), ctx.Queue(1000)
+    p = ctx.Process(target=_engine_proc, args=(cq, eq, str(tmp_path / "appdata")))
+    p.start()
+    bad = ev.StartBatch("A", "16:9", str(tmp_path / ("x" * 200)), str(tmp_path / "o"), "")
+    for _ in range(400):                     # each produces EngineError + LogLine (~1 KB): > pipe buffer
+        cq.put(bad)
+    time.sleep(3)                            # heartbeats pile up, nobody reads eq
+    cq.put(ev.Shutdown())
+    p.join(30)
+    alive = p.is_alive()
+    if alive:
+        p.kill()
+    assert not alive, "engine hung on exit with an unread event queue"

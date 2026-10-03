@@ -49,10 +49,24 @@ class EventSink:
 def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dict[str, Any],
                 parent_pid: int) -> None:
     from videogen.core.engine import Engine
+    from videogen.utils.system import redirect_missing_std_streams, write_crash_report
 
+    redirect_missing_std_streams(Path(appdata) / "logs")
     settings, warnings = settings_from_dict(settings_data)
     sink = EventSink(events_q)
-    engine = Engine(Path(appdata), settings, sink)
+    try:
+        engine = Engine(Path(appdata), settings, sink)
+    except Exception as exc:  # noqa: BLE001 - report why the engine could not start
+        write_crash_report(Path(appdata), "engine start", exc)
+        from videogen.core.errors import VideoGenError
+        msg = exc.user_message if isinstance(exc, VideoGenError) else "Не вдалося запустити обробник відео."
+        sink(ev.EngineError(time.time(), msg, repr(exc)))
+        try:
+            events_q.cancel_join_thread()
+        except (AttributeError, OSError, ValueError):
+            log.debug("events queue already closed")
+        return
+    log.info("engine started pid=%s parent=%s", os.getpid(), parent_pid)
     for w in warnings:
         log.warning("settings: %s", w)
     stop = threading.Event()
@@ -86,6 +100,12 @@ def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dic
     finally:
         stop.set()
         engine.shutdown()
+        # If the GUI is gone nobody drains events_q; without this the queue's
+        # feeder thread would block interpreter exit forever on a full pipe.
+        try:
+            events_q.cancel_join_thread()
+        except (AttributeError, OSError, ValueError):
+            log.debug("events queue already closed")
         if engine.batch_state is not BatchState.IDLE:
             log.error("engine exited with a running batch")
 

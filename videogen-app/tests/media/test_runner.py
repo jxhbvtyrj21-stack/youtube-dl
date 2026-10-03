@@ -106,5 +106,6 @@ def test_locator_rejects_broken_binary(monkeypatch, tmp_path):
         f.write_text("#!/bin/sh\nexit 1\n")
         f.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv("VIDEOGEN_FFMPEG_DIR", raising=False)
     with pytest.raises(FFmpegUnavailableError):
         locate()
