@@ -47,6 +47,11 @@ def make_qm(state, ex, **kw):
     return qm, rec
 
 
+def executing(ex, name):
+    with ex.lock:
+        return any(c[0] == name for c in ex.calls)
+
+
 def statuses(state, ids):
     return [state.get_job(j).status for j in ids]
 
@@ -76,7 +81,8 @@ def test_stop_cancels_current_and_remaining(state):
     ex = FakeExecutor(script={"job001": ["block"]})
     qm, rec = make_qm(state, ex)
     qm.start(ids)
-    assert wait_until(lambda: qm.active_jobs == [ids[1]], 5)
+    # a job is "active" slightly before the executor starts it; wait for the executor
+    assert wait_until(lambda: qm.active_jobs == [ids[1]] and executing(ex, "job001"), 5)
     qm.stop()
     assert qm.wait(5)
     assert statuses(state, ids) == [JobStatus.SUCCESS] + [JobStatus.CANCELLED] * 4
@@ -227,7 +233,7 @@ def test_interrupt_keeps_jobs_resumable(state):
     ex = FakeExecutor(script={"job000": ["block"]})
     qm, rec = make_qm(state, ex)
     qm.start(ids)
-    assert wait_until(lambda: qm.active_jobs == [ids[0]], 5)
+    assert wait_until(lambda: qm.active_jobs == [ids[0]] and executing(ex, "job000"), 5)
     qm.stop("GUI завершився аварійно", interrupt=True)
     assert qm.wait(5)
     assert statuses(state, ids) == [JobStatus.INTERRUPTED] * 3

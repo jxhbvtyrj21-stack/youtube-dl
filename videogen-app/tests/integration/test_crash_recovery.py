@@ -203,7 +203,7 @@ def test_engine_does_not_wait_on_full_channel_once_gui_is_gone(tmp_path):
         assert drain_until(lambda e: isinstance(e, ev.JobStageChanged), 60)
         for _ in range(2000):                    # stop reading and fill the channel up
             try:
-                eq.put_nowait("filler")
+                eq.put_nowait("x" * 1024)   # > pipe buffer on every OS
             except queue_mod.Full:
                 break
         gui.kill()
@@ -218,6 +218,11 @@ def test_engine_does_not_wait_on_full_channel_once_gui_is_gone(tmp_path):
             p.join(10)
         if gui.poll() is None:
             gui.kill()
+        # Nobody will read the channel again: without this the fillers still
+        # buffered in this process would block interpreter exit (Windows pipes
+        # are small) - the very hang the engine avoids the same way.
+        for q in (eq, cq):
+            q.cancel_join_thread()
     assert not alive
     assert exit_s < 12, f"engine took {exit_s:.1f} s to exit after the GUI vanished"
     s = StateManager(tmp_path / "appdata" / "state.db")
