@@ -6,6 +6,9 @@ on:
       scale:
         description: "full | quick"
         default: "full"
+      select:
+        description: "optional pytest -k expression (empty = the whole series)"
+        default: ""
   push:
     paths:
       - "videogen-app/tests/production/**"
@@ -58,12 +61,27 @@ jobs:
         continue-on-error: true
         env:
           VIDEOGEN_FFMPEG_DIR: ${{ github.workspace }}\videogen-app\packaging\third_party\ffmpeg
-        run: python -m pytest -m production tests/production -v -rA --timeout=0 -p no:cacheprovider
+          VIDEOGEN_PROD_SELECT: ${{ github.event.inputs.select || '' }}
+        run: |
+          $sel = @()
+          if ($env:VIDEOGEN_PROD_SELECT) { $sel = @("-k", $env:VIDEOGEN_PROD_SELECT) }
+          python -m pytest -m production tests/production -v -rA --timeout=0 -p no:cacheprovider @sel
       - name: Windows process list after the suite
         if: always()
         run: |
           Get-Process | Where-Object { $_.ProcessName -match '^(ffmpeg|ffprobe|VideoGen|python)' } |
             Format-Table Id, ProcessName, StartTime, WorkingSet64 -AutoSize
+      - name: Collect Engine/GUI logs of every test
+        if: always()
+        run: |
+          $dst = "tests/production/reports/logs"
+          Get-ChildItem -Path $env:VIDEOGEN_PROD_DIR -Recurse -Include *.log -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $rel = $_.FullName.Substring((Resolve-Path $env:VIDEOGEN_PROD_DIR).Path.Length).TrimStart('\')
+              $to = Join-Path $dst $rel
+              New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
+              Copy-Item $_.FullName $to
+            }
       - name: Build STRESS_TEST_REPORT.md
         if: always()
         run: |

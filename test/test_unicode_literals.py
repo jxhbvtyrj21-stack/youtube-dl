@@ -22,6 +22,7 @@ IGNORED_FILES = [
 IGNORED_DIRS = [
     '.git',
     '.tox',
+    'videogen-app',  # separate Python 3 application with its own CI
 ]
 
 from test.helper import assertRegexpMatches

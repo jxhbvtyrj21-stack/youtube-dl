@@ -27,15 +27,15 @@ from tests.production.media_sets import FFMPEG, corrupted_jpeg, corrupted_png, n
 
 @pytest.mark.timeout(3600)
 def test_03_real_image_stress(work, record, baseline):
-    record.update(number="3", title="REAL IMAGE STRESS: 37 проблемних і незвичних файлів", input=(
+    deep = work / ("глибока папка " * 6).strip() / "Фото (2026) & #%+"
+    exp = problem_set(deep)
+    record.update(number="3", title=f"REAL IMAGE STRESS: {len(exp)} проблемних і незвичних файлів", input=(
         "JPG, PNG, PNG з альфою, WEBP, 108 Мп JPEG, 81 Мп PNG, 8000×400, 400×6000, EXIF 1–8, битий EXIF, "
         "LAB ICC-профіль, CMYK, 16 біт, Unicode-ім'я, ім'я 170+ символів у глибокій папці, PNG як .jpg, "
         "JPEG як .webp, пошкоджені PNG/JPEG, 0 байт, сміття, обрізані JPEG/PNG, сигнатура HEIC, "
         "«декомпресійна бомба» 225 Мп"),
         expected="жоден файл не обробляється нескінченно; кожен — валідний, відновлений або INVALID з причиною; "
                  "відео створено, статус PARTIAL (не SUCCESS)")
-    deep = work / ("глибока папка " * 6).strip() / "Фото (2026) & #%+"
-    exp = problem_set(deep)
     tp = TimeoutPolicy()
     table = []
     worker_peak = [0.0]
@@ -173,8 +173,9 @@ def test_13_large_archive(work, record, baseline):
     from videogen.media.archiver import ArchiveEntry
     from PIL import Image
     n = scale(300, 30)
-    record.update(number="13", title=f"LARGE ARCHIVE: {n} файлів шуму ≈ {n * 5} МБ", input=(
-        f"{n} JPEG 3000×2000 з випадковим шумом (практично нестискувані, ~5 МБ кожен)"),
+    record.update(number="13", title=f"LARGE ARCHIVE: {n} нестискуваних файлів", input=(
+        f"{n} JPEG 3000×2000 з випадковим шумом, якість 97 (практично нестискувані, ~8 МБ кожен; "
+        "фактичний обсяг — у RESOURCE USAGE)"),
         expected="архів створено потоково окремим процесом; RAM не залежить від розміру архіву; "
                  "цілісність (CRC усіх записів) підтверджено")
     src = work / "src"

@@ -34,8 +34,18 @@ class EventSink:
     def __init__(self, q: Any) -> None:
         self.q = q
         self.dropped = 0
+        # Set once the GUI is known to be gone: nobody will ever make room in
+        # the channel, so waiting for it only delays cancellation and exit.
+        self.consumer_gone = threading.Event()
 
     def __call__(self, e: ev.Event) -> None:
+        if self.consumer_gone.is_set():
+            try:
+                self.q.put_nowait(e)
+                return
+            except (queue_mod.Full, OSError, ValueError):
+                self.dropped += 1
+                return
         droppable = isinstance(e, ev.DROPPABLE_EVENTS)
         for _ in range(1 if droppable else NON_DROPPABLE_RETRIES):
             try:
@@ -77,6 +87,7 @@ def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dic
             sink(ev.Heartbeat(time.time(), engine.batch_state))
             if not _alive(parent_pid):
                 log.error("GUI process %s is gone; engine shutting down", parent_pid)
+                sink.consumer_gone.set()
                 gui_lost.set()
                 stop.set()
 
@@ -101,8 +112,9 @@ def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dic
                 sink(ev.EngineError(time.time(), "Внутрішня помилка під час виконання команди.", repr(exc)))
     finally:
         stop.set()
-        log.info("engine exiting; undelivered GUI events dropped: %d", sink.dropped)
-        engine.shutdown(interrupt=gui_lost.is_set())
+        log.info("engine exiting")
+        engine.shutdown(interrupt=gui_lost.is_set(),
+                        final_note=lambda: f"engine stopped; undelivered GUI events dropped: {sink.dropped}")
         # If the GUI is gone nobody drains events_q; without this the queue's
         # feeder thread would block interpreter exit forever on a full pipe.
         try:

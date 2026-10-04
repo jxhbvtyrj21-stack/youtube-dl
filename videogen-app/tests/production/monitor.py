@@ -87,9 +87,11 @@ def rss_mb(pid: int) -> float:
 
 
 def count_files(path: Path) -> int:
+    """Files in a workspace, not counting the ownership marker (it is part of
+    an empty workspace, see storage/workspace.py)."""
     n = 0
     for _d, _s, files in os.walk(path):
-        n += len(files)
+        n += sum(1 for f in files if f != ".videogen-workspace")
     return n
 
 

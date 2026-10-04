@@ -239,20 +239,37 @@ def test_07_engine_failure_gui_survives(work, record, baseline):
 
 @pytest.mark.timeout(1800)
 def test_08_event_channel_consumer_disappears(work, record, baseline):
+    from videogen.gui.engine_client import EVENTS_QUEUE_MAX
     record.update(number="8", title="EVENT CHANNEL: споживач подій зник, канал переповнюється", input=(
-        "GUI-процес без Job Object (VIDEOGEN_TEST_NO_JOB_OBJECT=1) рендерить довге відео і вбивається; "
-        "Engine продовжує генерувати події в канал, який ніхто не читає"),
-        expected="Engine сам виявляє зникнення GUI, зупиняє роботу і завершується; канал подій переповнений, "
-                 "але це не блокує вихід; FFmpeg завершено. Постійний регресійний тест "
+        "GUI-процес без Job Object (VIDEOGEN_TEST_NO_JOB_OBJECT=1) рендерить довге відео; GUI-потік "
+        f"«зависає» і перестає читати події, доки канал (ємність {EVENTS_QUEUE_MAX}) не заповниться і Engine "
+        "не почне відкидати події; потім GUI-процес вбивається"),
+        expected="поки GUI завис, Engine не блокується (рендеринг триває, канал заповнений, події "
+                 "відкидаються); після зникнення GUI Engine сам це виявляє, зупиняє роботу і завершується; "
+                 "FFmpeg завершено; job INTERRUPTED. Постійний регресійний тест "
                  "test_engine_exits_even_if_nobody_reads_events лишається в основному наборі")
-    inp = _long_job(work)
-    g = GuiProcess(work / "appdata", inp, work / "out", work / "ws", "start",
+    # The job must outlast filling the channel at its production capacity: ~3 events/s reach
+    # the channel while a job runs (measured), so 1000 events need ~6 min. Rendering runs at
+    # ~0.8x real time at 1080p (Windows CI) and ~15x at quick scale; 2x margin on both.
+    inp = _long_job(work, n=40, spi=20.0) if FULL else _long_job(work, n=50, spi=120.0)
+    db = work / "appdata" / "state.db"
+    g = GuiProcess(work / "appdata", inp, work / "out", work / "ws", "freeze",
                    settings_json=env_settings_json(prod_settings()),
                    extra_env={"VIDEOGEN_TEST_NO_JOB_OBJECT": "1"})
-    assert g.wait(lambda s: s.get("stage") == "RENDERING" and s.get("frame", 0) > 0, 600), g.other[-20:]
-    engine_pid = g.last["engine_pid"]
-    tree = _tree(engine_pid)
-    g.kill()
+    try:
+        assert g.wait(lambda s: s.get("frozen"), 600), (g.status[-3:], g.other[-20:])
+        engine_pid = next(s["engine_pid"] for s in g.status if "engine_pid" in s)
+        t_freeze = time.monotonic()
+        seg_at_freeze = (_db_rows(db) or [("", "", "", 0)])[0][3]
+        full = g.wait(lambda s: s.get("events_queued", 0) >= EVENTS_QUEUE_MAX, 1200)
+        fill_s = time.monotonic() - t_freeze
+        status_at_fill = (_db_rows(db) or [("", "")])[0][1]
+        time.sleep(15)                       # Engine keeps producing into the full channel
+        seg_at_kill = (_db_rows(db) or [("", "", "", 0)])[0][3]
+        queued = g.last.get("events_queued")
+        tree = _tree(engine_pid)
+    finally:
+        g.kill()
     t0 = time.monotonic()
     engine_exited = _gone([engine_pid], 60)
     exit_s = time.monotonic() - t0
@@ -260,15 +277,26 @@ def test_08_event_channel_consumer_disappears(work, record, baseline):
     log = (work / "appdata" / "logs" / "application.log").read_text(encoding="utf-8")
     m = re.search(r"undelivered GUI events dropped: (\d+)", log)
     dropped = int(m.group(1)) if m else -1
-    record["resource_usage"] = {"engine_exit_s": round(exit_s, 1), "events_dropped": dropped,
+    record["resource_usage"] = {"channel_capacity": EVENTS_QUEUE_MAX, "events_queued_at_kill": queued,
+                                "channel_fill_s": round(fill_s, 1), "job_status_when_full": status_at_fill,
+                                "events_dropped": dropped,
+                                "segments_rendered_while_frozen": seg_at_kill - seg_at_freeze,
+                                "engine_exit_s": round(exit_s, 1),
                                 "gui_gone_detected": "GUI process" in log and "is gone" in log}
-    record["actual"] = (f"Engine завершився за {exit_s:.1f} с після зникнення GUI; невидачених подій "
-                        f"(канал заповнений/відкинуто): {dropped}; дерево процесів завершено: {rest_gone}")
-    s = StateManager(work / "appdata" / "state.db")
+    record["actual"] = (f"канал заповнено ({queued}/{EVENTS_QUEUE_MAX}) за {fill_s:.0f} с після зависання GUI; "
+                        f"за час зависання відрендерено ще {seg_at_kill - seg_at_freeze} фрагм.; "
+                        f"відкинуто подій: {dropped}; Engine завершився за {exit_s:.1f} с після зникнення GUI; "
+                        f"дерево процесів завершено: {rest_gone}")
+    s = StateManager(db)
     st = [j.status.value for j in s.list_jobs()]
     s.close()
     record["notes"].append(f"стан job після зникнення GUI: {st}")
+    assert full, f"event channel never filled: {g.last}"
+    assert status_at_fill == "RUNNING", "the channel must fill up while the job is still rendering"
+    assert dropped > 0, "the channel was full, so the Engine must have dropped events"
+    assert seg_at_kill > seg_at_freeze, "a frozen GUI must not block rendering"
     assert engine_exited and rest_gone
+    assert exit_s < 15, "with the GUI gone the engine must not wait for room in the channel"
     assert "is gone; engine shutting down" in log
     assert st == ["INTERRUPTED"]                     # resumable, not cancelled
     assert _resolve_interrupted(work / "appdata") and ws_files(work / "ws") == []
@@ -492,7 +520,7 @@ def test_11_disk_space(work, record, baseline):
     vol = Path(SMALL)
     base = vol / f"vg-{int(time.time())}"
     base.mkdir()
-    s = prod_settings(resources=ResourceLimits(disk_reserve_mb=32, ram_available_min_mb=256))
+    s = prod_settings(resources=ResourceLimits(disk_reserve_mb=64, ram_available_min_mb=256))
     results = {}
     h = EngineHarness(work / "appdata", s).start()
     try:

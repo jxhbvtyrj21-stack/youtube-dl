@@ -3,11 +3,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
-import os
 from pathlib import Path
 
 from videogen.config.settings import (
-    ImageSettings, ResourceLimits, Settings, TimeoutPolicy, VideoSettings, settings_from_dict,
+    ResourceLimits, Settings, TimeoutPolicy, VideoSettings, settings_from_dict,
 )
 from videogen.media.media_validator import probe_media
 from tests.production import monitor
@@ -25,7 +24,13 @@ def prod_settings(**over) -> Settings:
         s = dataclasses.replace(s, video=VideoSettings(horizontal_width=640, horizontal_height=360,
                                                        vertical_width=360, vertical_height=640,
                                                        preset="veryfast"))
-    return dataclasses.replace(s, **over)
+    s = dataclasses.replace(s, **over)
+    # The Engine replaces invalid values with defaults (with only a log
+    # warning). A test must never run with settings it did not ask for.
+    _, warnings = settings_from_dict(s.to_dict())
+    if warnings:
+        raise ValueError(f"invalid test settings: {warnings}")
+    return s
 
 
 def expected_frames(duration_s: float, fps: int = 30) -> int:

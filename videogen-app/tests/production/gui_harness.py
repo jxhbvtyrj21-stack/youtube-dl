@@ -1,12 +1,17 @@
 """A real GUI process (QApplication + MainWindow + EngineClient) driven by a
 test. Prints one JSON status line every 200 ms to stdout.
 
-    python gui_harness.py <appdata> <input> <output> <workspace> start|recover|idle
+    python gui_harness.py <appdata> <input> <output> <workspace> start|recover|idle|freeze
+
+``freeze``: like ``start``, but once rendering has begun the GUI thread
+hangs (stops reading engine events, like a "not responding" window); a
+plain thread keeps printing the fill level of the event channel.
 """
 
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +35,19 @@ def main() -> None:
     w.ws_pick.set_path(ws)
     state = {"started": False, "last": time.monotonic(), "max_gap": 0.0, "recovered": False}
 
+    def channel_fill() -> None:
+        for _ in range(7200):   # bounded: <= 1 h; the test kills this process long before
+            try:
+                n = w.client._events.qsize()
+            except (AttributeError, NotImplementedError, OSError, ValueError):
+                n = -1
+            print(json.dumps({"t": time.time(), "frozen": True, "events_queued": n}), flush=True)
+            time.sleep(0.5)
+
+    def freeze() -> None:
+        threading.Thread(target=channel_fill, daemon=True).start()
+        threading.Event().wait(3600)   # GUI thread hangs; the test kills this process
+
     def beat() -> None:
         now = time.monotonic()
         state["max_gap"] = max(state["max_gap"], now - state["last"] - 0.05)
@@ -37,7 +55,7 @@ def main() -> None:
 
     def report() -> None:
         m = w.model
-        if mode == "start" and m.engine_ready and not state["started"]:
+        if mode in ("start", "freeze") and m.engine_ready and not state["started"]:
             w.btn_start.click()
             state["started"] = True
         if mode == "recover" and w._recovery is not None and not state["recovered"]:
@@ -53,6 +71,8 @@ def main() -> None:
             "recovered": state["recovered"], "max_gap_ms": round(state["max_gap"] * 1000, 1),
         }), flush=True)
         state["max_gap"] = 0.0
+        if mode == "freeze" and cj and cj.stage.value == "RENDERING" and cj.frame > 0:
+            freeze()
 
     t1 = QTimer()
     t1.timeout.connect(beat)

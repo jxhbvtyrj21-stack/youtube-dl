@@ -159,6 +159,75 @@ def test_engine_exits_even_if_nobody_reads_events(tmp_path):
     assert not alive, "engine hung on exit with an unread event queue"
 
 
+def _engine_proc_with_parent(cq, eq, appdata, settings, parent_pid):
+    from videogen.config.settings import settings_from_dict
+    from videogen.engine_main import engine_main
+    engine_main(cq, eq, appdata, settings_from_dict(settings)[0].to_dict(), parent_pid=parent_pid)
+
+
+def test_engine_does_not_wait_on_full_channel_once_gui_is_gone(tmp_path):
+    """Regression (production test 8): with the GUI gone and the event channel
+    full, every non-droppable event still waited 5 s for room that could never
+    come: cancellation reached FFmpeg 5 s late and shutdown took 5 s per event
+    (per queued job) instead of being immediate."""
+    import multiprocessing
+    import queue as queue_mod
+    from videogen.core.state_manager import StateManager
+    from tests.pipeline_support import start_cmd
+    ctx = multiprocessing.get_context("spawn")
+    gui = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    cq, eq = ctx.Queue(), ctx.Queue(1000)
+    inp = tmp_path / "in"
+    for i in range(20):
+        make_job_folder(inp, f"j{i:02d}", n_images=3, audio_s=6.0)
+    p = ctx.Process(target=_engine_proc_with_parent,
+                    args=(cq, eq, str(tmp_path / "appdata"), small_settings().to_dict(), gui.pid))
+    p.start()
+    try:
+        seen: list = []
+
+        def drain_until(pred, timeout):
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                try:
+                    e = eq.get(timeout=0.2)
+                except queue_mod.Empty:
+                    continue
+                seen.append(e)
+                if pred(e):
+                    return True
+            return False
+
+        assert drain_until(lambda e: isinstance(e, ev.EngineReady), 60)
+        cq.put(start_cmd(inp, tmp_path / "out", tmp_path / "ws"))
+        assert drain_until(lambda e: isinstance(e, ev.JobStageChanged), 60)
+        for _ in range(2000):                    # stop reading and fill the channel up
+            try:
+                eq.put_nowait("filler")
+            except queue_mod.Full:
+                break
+        gui.kill()
+        gui.wait(10)
+        t0 = time.monotonic()
+        p.join(60)
+        exit_s = time.monotonic() - t0
+        alive = p.is_alive()
+    finally:
+        if p.is_alive():
+            p.kill()
+            p.join(10)
+        if gui.poll() is None:
+            gui.kill()
+    assert not alive
+    assert exit_s < 12, f"engine took {exit_s:.1f} s to exit after the GUI vanished"
+    s = StateManager(tmp_path / "appdata" / "state.db")
+    try:
+        statuses = {j.status for j in s.list_jobs()}
+    finally:
+        s.close()
+    assert statuses <= {JobStatus.INTERRUPTED, JobStatus.SUCCESS} and JobStatus.INTERRUPTED in statuses
+
+
 def test_gui_loss_leaves_job_resumable_with_workspace(tmp_path):
     """Regression (production tests 6/9): graceful engine shutdown because the
     GUI vanished must keep the job resumable — and Resume must reuse work."""

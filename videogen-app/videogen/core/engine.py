@@ -299,9 +299,11 @@ class Engine:
     def wait_idle(self, timeout: float) -> bool:
         return self.queue.wait(timeout) if self.queue else True
 
-    def shutdown(self, timeout: float = 20.0, *, interrupt: bool = False) -> None:
+    def shutdown(self, timeout: float = 20.0, *, interrupt: bool = False,
+                 final_note: Callable[[], str] | None = None) -> None:
         """``interrupt=True`` when the GUI vanished: unfinished jobs stay
-        resumable (INTERRUPTED) instead of being cancelled."""
+        resumable (INTERRUPTED) instead of being cancelled. ``final_note`` is
+        logged after everything stopped, while the log is still open."""
         if self.queue is not None and self.queue.batch_state is not BatchState.IDLE:
             self.queue.stop("GUI завершився аварійно" if interrupt else "Програму закрито.", interrupt=interrupt)
             self.queue.wait(timeout)
@@ -311,6 +313,8 @@ class Engine:
         if self._monitor is not None:
             self._monitor.stop()
         self.state.close()
+        if final_note is not None:
+            log.info("%s", final_note())
         if self.log_system is not None:
             self.log_system.shutdown()
         self._lock.release()
