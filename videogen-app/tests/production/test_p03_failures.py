@@ -340,13 +340,21 @@ def test_09_restart_recovery(work, record, baseline):
         def done(_s):
             return {r[0]: r[1] for r in _db_rows(db)}.get("2 довгий") == "SUCCESS"
         assert g2.wait(done, 1500)
+        tree2 = _tree(g2.last["engine_pid"])
     finally:
-        g2.kill()
+        g2.kill()              # killed as soon as SUCCESS is in the DB: maybe before its cleanup
+    assert _gone(tree2, 60)    # Windows: Job Object; elsewhere the engine notices the GUI is gone
+    ws_after_kill = len(ws_files(work / "ws"))
     new_log = log_path.read_text(encoding="utf-8")[len(log_before):] if log_path.exists() else ""
+    h = EngineHarness(work / "appdata", prod_settings()).start()    # one more start finishes cleanup
+    h.stop()
+    ws_after_restart = ws_files(work / "ws")
     rendered_after = len(re.findall(r"segment \d+/12 rendered", new_log))
     final_rows = {r[0]: r for r in _db_rows(db)}
     record["resource_usage"] = {"resume_point": resume_point, "segments_rendered_after_restart": rendered_after,
-                                "first_output_unchanged": sha256_file(first_out)[0] == first_sha}
+                                "first_output_unchanged": sha256_file(first_out)[0] == first_sha,
+                                "workspace_files_after_kill": ws_after_kill,
+                                "workspace_files_after_next_start": len(ws_after_restart)}
     record["actual"] = (f"після перезапуску GUI отримав пропозицію відновлення і обрав Resume; "
                         f"відрендерено {rendered_after} фрагментів із 12 (готових на момент аварії: {resume_point}); "
                         f"другий job {final_rows['2 довгий'][1]}; перший вихід незмінний (SHA-256): "
@@ -355,6 +363,7 @@ def test_09_restart_recovery(work, record, baseline):
     assert sha256_file(first_out)[0] == first_sha
     assert rendered_after <= 12 - resume_point
     assert sorted(p.name for p in (work / "out").glob("*.mp4")) == ["1 короткий.mp4", "2 довгий.mp4"]
+    assert ws_after_restart == [], "a crash after SUCCESS must not leak the workspace past the next start"
     assert_no_media_processes(baseline)
 
 

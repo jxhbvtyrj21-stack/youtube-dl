@@ -248,13 +248,18 @@ class MediaPipeline:
         if not keep_diag:
             remove_tree(run.diag_dir, deadline_s=10, require_managed=False)
         keep_ws = final.status is JobStatus.FAILED and self.s.cleanup.keep_failed_workspace
-        if not keep_ws:
-            deadline = timeouts.cleanup(self.s.timeouts, count_files(run.ws.root, limit=200_000))
-            res = remove_tree(run.ws.root, deadline_s=deadline)
-            if not res.ok:
-                self.env.state.add_pending_cleanup(str(run.ws.root))
-                log.warning("workspace cleanup incomplete; scheduled for next start",
-                            extra={"job_id": ctx.job_id})
+        ws_key = self.env.state.workspace_dir(ctx.job_id)   # registered with the final status
+        if keep_ws:
+            self.env.state.remove_pending_cleanup(ws_key)
+            return
+        deadline = timeouts.cleanup(self.s.timeouts, count_files(run.ws.root, limit=200_000))
+        res = remove_tree(run.ws.root, deadline_s=deadline)
+        if res.ok:
+            self.env.state.remove_pending_cleanup(ws_key)
+        else:
+            self.env.state.add_pending_cleanup(ws_key)
+            log.warning("workspace cleanup incomplete; scheduled for next start",
+                        extra={"job_id": ctx.job_id})
 
     # ================================================================ stages
 

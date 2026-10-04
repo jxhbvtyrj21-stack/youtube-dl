@@ -156,7 +156,13 @@ class Engine:
             removed = remove_stale_parts(Path(out_dir), {k for k in known})
             for r in removed:
                 log.warning("removed incomplete output %s", r)
+        # workspaces still needed for Resume are never cleaned, whatever was recorded
+        resumable = {self.state.workspace_dir(j.job_id)
+                     for j in self.state.list_jobs(statuses=[JobStatus.INTERRUPTED])}
         for path, attempts in self.state.pending_cleanups():
+            if path in resumable:
+                self.state.remove_pending_cleanup(path)
+                continue
             res = remove_tree(Path(path), deadline_s=30)
             if res.ok or not Path(path).exists():
                 self.state.remove_pending_cleanup(path)
@@ -188,8 +194,9 @@ class Engine:
             return
         ws = Path(self.state.workspace_dir(job_id))
         if action is RecoveryAction.IGNORE:
-            self.state.transition(job_id, JobStatus.CANCELLED)
-            remove_tree(ws, deadline_s=60)
+            self.state.transition(job_id, JobStatus.CANCELLED)     # also schedules the cleanup
+            if remove_tree(ws, deadline_s=60).ok:
+                self.state.remove_pending_cleanup(str(ws))
             return
         self.state.transition(job_id, JobStatus.QUEUED, clear_error=True)
         if action is RecoveryAction.RETRY:

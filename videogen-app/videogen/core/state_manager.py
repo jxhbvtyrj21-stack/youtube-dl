@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS pending_cleanup (
 """
 
 
+# final statuses whose workspace is deleted (INTERRUPTED keeps it for resume)
+_CLEANUP_STATUSES = (JobStatus.SUCCESS, JobStatus.PARTIAL, JobStatus.FAILED, JobStatus.CANCELLED)
+
+
 @dataclass(frozen=True)
 class OpenReport:
     recovered_from_corruption: bool = False
@@ -303,6 +307,14 @@ class StateManager:
                 sets.append("attempts=attempts+1")
             args.append(job_id)
             c.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?", args)
+            if new in _CLEANUP_STATUSES:
+                # Write-ahead: the workspace removal is recorded in the same
+                # transaction as the final status, so a crash before the
+                # workspace is actually deleted cannot leak it (the next start
+                # finishes the job). The executor unregisters it once done.
+                c.execute("INSERT INTO pending_cleanup(path, added_at, attempts) "
+                          "SELECT workspace_dir, ?, 0 FROM jobs WHERE job_id=? AND workspace_dir != '' "
+                          "ON CONFLICT(path) DO NOTHING", (now, job_id))
         return self.get_job(job_id)
 
     def set_stage(self, job_id: str, stage: Stage) -> None:
@@ -324,6 +336,7 @@ class StateManager:
         """Manual 'Retry': start the job from scratch (resume point cleared)."""
         st = self.transition(job_id, JobStatus.QUEUED, clear_error=True)
         self.set_resume_point(job_id, 0)
+        self.remove_pending_cleanup(self.workspace_dir(job_id))   # the workspace is in use again
         return self.get_job(st.job_id)
 
     def mark_running_as_interrupted(self) -> list[str]:

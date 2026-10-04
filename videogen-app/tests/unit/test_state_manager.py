@@ -150,3 +150,26 @@ def test_concurrent_transitions_are_serialised(state):
         t.join(20)
     assert not errors
     assert state.counters().succeeded == 40
+
+
+def test_terminal_transition_schedules_workspace_cleanup_atomically(state):
+    """Regression (production test 14 after test 9): the final status was
+    committed before the workspace was deleted; a crash in between leaked
+    the workspace forever. The cleanup is now recorded in the same
+    transaction as the final status (write-ahead)."""
+    ids = add_jobs(state, 4)
+    for jid, final in zip(ids, [JobStatus.SUCCESS, JobStatus.FAILED, JobStatus.CANCELLED]):
+        state.transition(jid, JobStatus.RUNNING)
+        state.transition(jid, final, output_file="x" if final is JobStatus.SUCCESS else None)
+    state.transition(ids[3], JobStatus.RUNNING)
+    state.transition(ids[3], JobStatus.INTERRUPTED)            # resumable: workspace must stay
+    pending = {p for p, _ in state.pending_cleanups()}
+    assert pending == {state.workspace_dir(j) for j in ids[:3]}
+
+
+def test_manual_retry_unschedules_workspace_cleanup(state):
+    [jid] = add_jobs(state, 1)
+    state.transition(jid, JobStatus.RUNNING)
+    state.transition(jid, JobStatus.FAILED, error=ErrorInfo("TIMEOUT", "TIMEOUT", "x"))
+    state.reset_for_retry(jid)
+    assert state.pending_cleanups() == []

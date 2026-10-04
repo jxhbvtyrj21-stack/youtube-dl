@@ -233,6 +233,34 @@ def test_engine_does_not_wait_on_full_channel_once_gui_is_gone(tmp_path):
     assert statuses <= {JobStatus.INTERRUPTED, JobStatus.SUCCESS} and JobStatus.INTERRUPTED in statuses
 
 
+def test_crash_between_final_status_and_cleanup_does_not_leak_workspace(tmp_path, monkeypatch):
+    """Regression (production test 14 after test 9): the process was killed
+    after SUCCESS was committed but before the workspace was deleted; nothing
+    ever removed that workspace. The next start must clean it."""
+    from videogen.core import pipeline as pl
+    from tests.pipeline_support import start_cmd
+    d = {k: tmp_path / k for k in ("input", "output", "ws", "appdata")}
+    make_job_folder(d["input"], "j", n_images=2, audio_s=2.0)
+    monkeypatch.setattr(pl.MediaPipeline, "finalize", lambda self, ctx, final: None)   # "killed" here
+    eng = Engine(d["appdata"], small_settings(), lambda e: None)
+    eng.startup()
+    eng.start_batch(start_cmd(d["input"], d["output"], d["ws"]))
+    assert eng.wait_idle(120)
+    [job] = eng.state.list_jobs()
+    ws = Path(eng.state.workspace_dir(job.job_id))
+    eng.shutdown()
+    assert job.status is JobStatus.SUCCESS and any(p.is_file() for p in ws.rglob("*"))
+    monkeypatch.undo()
+    eng2 = Engine(d["appdata"], small_settings(), lambda e: None)
+    try:
+        eng2.startup()
+        assert not ws.exists(), [str(p) for p in ws.rglob("*")]
+        assert eng2.state.pending_cleanups() == []
+        assert (d["output"] / "j.mp4").exists()                  # the result is untouched
+    finally:
+        eng2.shutdown()
+
+
 def test_gui_loss_leaves_job_resumable_with_workspace(tmp_path):
     """Regression (production tests 6/9): graceful engine shutdown because the
     GUI vanished must keep the job resumable — and Resume must reuse work."""
