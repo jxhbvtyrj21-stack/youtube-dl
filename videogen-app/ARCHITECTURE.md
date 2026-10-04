@@ -278,7 +278,7 @@ runtime-ситуація; тест перевіряє всю таблицю).
 | RUNNING | SUCCESS, PARTIAL, FAILED, CANCELLED, INTERRUPTED, RETRY_PENDING |
 | RETRY_PENDING | RUNNING, QUEUED, CANCELLED, INTERRUPTED |
 | INTERRUPTED | QUEUED (Resume/Retry), CANCELLED (Ignore) |
-| FAILED, PARTIAL, CANCELLED | QUEUED (лише ручна дія «Retry») |
+| FAILED, PARTIAL, CANCELLED | QUEUED — перехід дозволено таблицею, але **жодна дія програми його зараз не виконує** (ручного Retry для цих станів немає) |
 | SUCCESS | — (абсолютно термінальний) |
 
 **CANCELLED проти INTERRUPTED.** CANCELLED — лише рішення користувача (STOP,
@@ -306,9 +306,11 @@ CANCEL CURRENT JOB): тимчасові файли видаляються. Як�
 Програма ніколи не видаляє перевірене опубліковане відео; SUCCESS не ставиться
 без архіву (якщо архів увімкнено).
 
-`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED` — термінальні для автоматики:
-змінити їх може лише явна дія користувача. Ручний Retry для PARTIAL
-створює **новий** вихідний файл і ніколи не перезаписує попередній.
+`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED` — термінальні: автоматика їх не
+змінює, а дії користувача для їх зміни в програмі **немає**. Resume / Retry /
+Ignore існують лише для INTERRUPTED (`Engine.recover` ігнорує job в іншому
+стані). Повторна обробка тієї ж папки — це новий пакет і новий job з новим
+вихідним файлом; попередній файл ніколи не перезаписується.
 
 **PARTIAL (DEGRADED)** — відео створене й пройшло верифікацію, але не з
 повного набору матеріалів. Такий job не рахується як успішний: у GUI

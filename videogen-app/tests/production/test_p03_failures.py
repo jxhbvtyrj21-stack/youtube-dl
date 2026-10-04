@@ -151,7 +151,8 @@ def test_06_gui_crash_during_render(work, record, baseline):
         "окремий процес GUI (QApplication + MainWindow + Engine) рендерить довге відео; GUI вбито "
         "(TerminateProcess) посеред рендерингу"),
         expected="GUI → Engine → FFmpeg завершуються (Windows Job Object); немає сиріт і заблокованих "
-                 "файлів; немає пошкодженого виходу; workspace очищується; стан INTERRUPTED")
+                 "файлів (workspace можна видалити); немає пошкодженого виходу; RUNNING стає INTERRUPTED. "
+                 "Перезапуск програми і рішення «Ігнорувати» цей тест НЕ виконує (див. тести 7, 9)")
     inp = _long_job(work)
     g = GuiProcess(work / "appdata", inp, work / "out", work / "ws", "start", settings_json=env_settings_json(prod_settings()))
     assert g.wait(lambda s: s.get("stage") == "RENDERING" and s.get("frame", 0) > 0, 600), g.other[-20:]
@@ -179,8 +180,9 @@ def test_06_gui_crash_during_render(work, record, baseline):
                                 "all_gone_s": round(gone_s, 2), "mechanism": mech}
     record["actual"] = (f"дерево з {len(tree)} процесів (ffmpeg: {len(ffmpeg_pids)}) завершилося за {gone_s:.1f} с "
                         f"({mech}); у output: {out_files or 'нічого'}; блокування engine.lock вільне: {lock_ok}; "
-                        f"workspace видалено: {cleaned}; стан у БД {rows_before[0][1] if rows_before else '?'} → "
-                        f"INTERRUPTED: {bool(interrupted)}")
+                        f"workspace видалено самим тестом (файли не заблоковані): {cleaned}; стан у БД "
+                        f"{rows_before[0][1] if rows_before else '?'} → INTERRUPTED (прямий виклик "
+                        f"mark_running_as_interrupted, без перезапуску): {bool(interrupted)}")
     assert all_gone and ffmpeg_pids
     assert not [f for f in out_files if f.endswith((".mp4", ".part"))]
     assert lock_ok and cleaned and interrupted
@@ -393,7 +395,8 @@ def _writer(db: str, ready) -> None:
 def test_10_state_database_failures(work, record, baseline):
     record.update(number="10", title="STATE DATABASE FAILURE: 7 сценаріїв", input=(
         "пошкоджена БД; БД заблокована іншим процесом; запис перервано TerminateProcess; некоректний JSON у "
-        "записі; відсутній файл стану; пошкоджений settings.json; пошкоджений manifest.json перерваного job"),
+        "записі; відсутній файл стану; settings.json зі сміттям (EngineHarness його не читає — справжню точку "
+        "входу перевіряє tests/gui/test_entry_point.py); пошкоджений manifest.json перерваного job"),
         expected="жодного зависання; де можливо — відновлення; валідна заблокована БД не переноситься в карантин")
     ctx = multiprocessing.get_context("spawn")
     results = {}

@@ -122,11 +122,12 @@ tests/stress`); результати Windows будуть додані післ�
 
 ## Production stress / failure testing на Windows
 
-Окремий набір `tests/production` (15 тестів: тривалий рендер 500 і 1000
+Окремий набір `tests/production` (16 тестів: тривалий рендер 500 і 1000
 зображень, 100 послідовних jobs, проблемні та пошкоджені зображення,
 зависання FFmpeg, аварії GUI і Engine, переповнення каналу подій,
 перезапуск і відновлення, збої бази стану, справжній малий том, перевірка
-виходу, великий архів, фінальний аудит ресурсів).
+виходу, великий архів, заповнення диска під час архівування (G), фінальний
+аудит ресурсів).
 
 ```
 python -m pytest -m production tests/production --timeout=0      # quick-масштаб
@@ -136,4 +137,8 @@ VIDEOGEN_PROD_SCALE=full python -m pytest -m production tests/production
 На `windows-latest` набір запускає `videogen-production-stress.yml`
 (масштаб `full`, том VHD 400 МБ для тесту дискового простору, журнали
 Engine/GUI в артефакті). Результати з реальними цифрами Windows (фінальний
-прогін — 15/15) — у `STRESS_TEST_REPORT.md`.
+прогін — 16/16) — у `STRESS_TEST_REPORT.md`; закриття прогалин B, E, F, G,
+H, I, K, L — у `GAP_CLOSING_REPORT.md` (тести `tests/gui/test_entry_point.py`,
+`tests/integration/test_publish_crash.py`, `test_worker_containment.py`,
+`test_visual_sanity.py`, `tests/ffmpeg/test_job_object_windows.py`; у Windows CI —
+окремий крок «Gap-closing tests with measured values»).

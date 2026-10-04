@@ -141,7 +141,8 @@ def test_12_output_validation(work, record, baseline):
     record.update(number="12", title="OUTPUT VALIDATION: 6 видів зіпсованого виходу", input=(
         "після збирання відео навмисно: файл видалено / 0 байт / випадкові байти / обрізано наполовину / "
         "без аудіо / тривалість 1 с замість 6 с"),
-        expected="жоден варіант не отримує SUCCESS; рівно одна повторна спроба; у папці результатів нічого")
+        expected="жоден варіант не отримує SUCCESS; у папці результатів нічого (кількість повторних спроб "
+                 "тут не перевіряється — її перевіряє test_output_validation_failure_is_never_success)")
     ctl = work / "corrupt_mode.txt"
     os.environ["VIDEOGEN_TEST_HOOKS"] = "1"
     os.environ["VIDEOGEN_TEST_CORRUPT_OUTPUT_FILE"] = str(ctl)
