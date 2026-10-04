@@ -27,7 +27,7 @@ from videogen.config.settings import Settings
 from videogen.core import events as ev
 from videogen.core import timeouts
 from videogen.core.errors import (
-    ArchiveError, ErrorClass, InputError, JobCancelledError, VerificationError,
+    ArchiveError, DiskSpaceError, ErrorClass, InputError, JobCancelledError, VerificationError,
 )
 from videogen.core.job_manager import JobContext, JobOutcome
 from videogen.core.models import (
@@ -634,6 +634,8 @@ class MediaPipeline:
             m.output_file, m.output_sha256 = None, ""
             self._save(run)
             raise
+        # the job is linked to its published video before anything else can fail
+        self.env.state.set_output_file(cfg.job_id, str(final))
         log.info("published %s", final, extra={"job_id": cfg.job_id, "stage": "FINALIZING", "event": "published"})
         return final
 
@@ -656,7 +658,13 @@ class MediaPipeline:
         if a.include_video:
             entries.append(ArchiveEntry(video, f"video/{video.name}"))
         dest = unique_output_path(Path(cfg.output_dir) / "_archive", video.stem, ".zip")
-        result = _run_archive_process(dest, entries, a.max_size_mb * 1024 * 1024, self.s, run.ctx)
+        try:
+            result = _run_archive_process(dest, entries, a.max_size_mb * 1024 * 1024, self.s, run.ctx)
+        except (ArchiveError, DiskSpaceError) as exc:
+            note = f"Відео «{video.name}» створено й перевірено, але архів не створено: {exc.user_message}"
+            m.warnings.append(note)
+            self._save(run)
+            raise type(exc)(note, code=exc.code, detail=exc.detail) from exc
         if result.get("skipped"):
             m.warnings.append(str(result["skipped"]))
             log.warning("archive skipped: %s", result["skipped"], extra={"job_id": cfg.job_id})
@@ -712,11 +720,16 @@ def _copy_fsync(src: Path, dst: Path, ctx: JobContext) -> None:
 
 def _archive_child(conn: Any, dest: str, entries: list[tuple[str, str]], max_bytes: int) -> None:
     from videogen.media.archiver import ArchiveEntry as AE, create_archive
+    from videogen.utils.system import exit_with_parent
+
+    part = Path(dest).with_name("." + Path(dest).name + ".part")
+    # never outlive the Engine: stop writing and drop the partial archive
+    exit_with_parent(lambda: part.unlink(missing_ok=True))
     try:
         res = create_archive(Path(dest), [AE(Path(s), a) for s, a in entries], max_size_bytes=max_bytes)
         conn.send({"ok": True, "path": res.path, "skipped": res.skipped_reason})
-    except ArchiveError as exc:
-        conn.send({"ok": False, "message": exc.user_message, "detail": exc.detail})
+    except (ArchiveError, DiskSpaceError) as exc:
+        conn.send({"ok": False, "message": exc.user_message, "detail": exc.detail, "code": exc.code})
     except Exception as exc:  # noqa: BLE001 - report everything to the parent
         conn.send({"ok": False, "message": "Не вдалося створити архів.", "detail": repr(exc)})
 
@@ -778,5 +791,8 @@ def _run_archive_process(dest: Path, entries: list[ArchiveEntry], max_bytes: int
     if result is None:
         raise ArchiveError("Процес архівування аварійно завершився.", code="ARCHIVE_CRASH")
     if not result.get("ok"):
+        if result.get("code") == "DISK_SPACE":
+            raise DiskSpaceError(str(result.get("message")), code="DISK_SPACE",
+                                 detail=str(result.get("detail", "")))
         raise ArchiveError(str(result.get("message")), detail=str(result.get("detail", "")))
     return result

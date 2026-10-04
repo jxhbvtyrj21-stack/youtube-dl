@@ -12,7 +12,7 @@ REPORTS = Path(__file__).parent / "reports"
 
 def fmt_usage(u: dict) -> str:
     keys = [k for k in u if not isinstance(u[k], (list, dict))]
-    return "<br>".join(f"{k}: {u[k]}" for k in keys[:14])
+    return "<br>".join(f"{k}: {u[k]}" for k in keys[:30])
 
 
 def main(out: Path, env_note: str) -> None:

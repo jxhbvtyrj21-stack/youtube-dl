@@ -117,6 +117,9 @@ def _child_main(conn: Connection, settings_dict: dict[str, Any], timeout_dict: d
     from videogen.media.image_normalizer import DecodeError, NormalizeTarget, normalize_with
     from videogen.media.image_validator import REASONS, validate_image
 
+    from videogen.utils.system import exit_with_parent
+
+    exit_with_parent()            # never outlive the Engine, even in the middle of a decode
     if log_queue is not None:
         configure_child_logging(log_queue)
     settings = ImageSettings(**settings_dict)

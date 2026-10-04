@@ -35,6 +35,16 @@ jobs:
         env:
           VIDEOGEN_FFMPEG_DIR: ${{ github.workspace }}\videogen-app\packaging\third_party\ffmpeg
         run: python -m pytest -q -ra --timeout=300
+      - name: Gap-closing tests with measured values (GAP_CLOSING_REPORT.md)
+        env:
+          VIDEOGEN_FFMPEG_DIR: ${{ github.workspace }}\videogen-app\packaging\third_party\ffmpeg
+        run: >
+          python -m pytest -v -s -p no:cacheprovider --timeout=600
+          tests/integration/test_worker_containment.py tests/integration/test_publish_crash.py
+          tests/integration/test_visual_sanity.py tests/gui/test_entry_point.py
+          "tests/media/test_audio_video.py::test_corrupted_bitstream_is_caught_only_by_full_decode"
+          "tests/integration/test_pipeline.py::test_damaged_bitstream_after_mux_is_never_published"
+          "tests/integration/test_pipeline.py::test_disk_full_while_archiving_pauses_batch_and_keeps_video_linked"
 
   build:
     name: Build EXE and self-test

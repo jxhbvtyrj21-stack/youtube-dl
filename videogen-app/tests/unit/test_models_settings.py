@@ -180,3 +180,16 @@ def test_settings_roundtrip_through_dict_without_warnings():
     s = Settings()
     back, warnings = settings_from_dict(s.to_dict())
     assert back == s and warnings == []
+
+
+@pytest.mark.parametrize("raw", [b"{ not json", b"\xff\xfe\x00garbage"])
+def test_unreadable_settings_file_is_set_aside_not_lost(tmp_path, raw, caplog):
+    """Regression (gap B): a damaged settings.json was replaced by defaults
+    without any record; the next save overwrote the user's file."""
+    p = tmp_path / "settings.json"
+    p.write_bytes(raw)
+    s, warnings = load_settings(p)
+    assert s == Settings() and warnings
+    backups = list(tmp_path.glob("settings.json.corrupt-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == raw
+    assert any("settings" in r.getMessage() for r in caplog.records)

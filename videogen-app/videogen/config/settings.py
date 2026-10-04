@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -281,16 +282,34 @@ def load_settings(path: Path) -> tuple[Settings, list[str]]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return Settings(), []
-    except (OSError, UnicodeDecodeError) as exc:
-        return Settings(), [f"не вдалося прочитати {path}: {exc}"]
+    except UnicodeDecodeError as exc:
+        return Settings(), [_set_aside(path, f"файл налаштувань пошкоджений ({exc})")]
+    except OSError as exc:
+        msg = f"не вдалося прочитати {path}: {exc}"
+        log.warning("settings: %s", msg)
+        return Settings(), [msg]
     try:
         data = json.loads(text)
     except ValueError as exc:
-        return Settings(), [f"файл налаштувань пошкоджений ({exc}); використано значення за замовчуванням"]
+        return Settings(), [_set_aside(path, f"файл налаштувань пошкоджений ({exc})")]
     settings, warnings = settings_from_dict(data)
     for w in warnings:
         log.warning("settings: %s", w)
     return settings, warnings
+
+
+def _set_aside(path: Path, reason: str) -> str:
+    """An unreadable settings file is kept as ``settings.json.corrupt-<time>``
+    (the next save would otherwise overwrite it silently) and logged."""
+    import time
+    backup = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        os.replace(path, backup)
+        msg = f"{reason}; використано значення за замовчуванням, файл збережено як {backup.name}"
+    except OSError as exc:
+        msg = f"{reason}; використано значення за замовчуванням (не вдалося зберегти копію: {exc})"
+    log.warning("settings: %s", msg)
+    return msg
 
 
 def save_settings(settings: Settings, path: Path) -> None:

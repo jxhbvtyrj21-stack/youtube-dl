@@ -253,3 +253,88 @@ def test_archive_verification_detects_corruption(tmp_path):
     dest.write_bytes(bytes(data))
     with pytest.raises((ArchiveError, zipfile.BadZipFile)):
         _verify(dest, entries, sum(e.source.stat().st_size for e in entries), None)
+
+
+def test_archive_disk_full_is_disk_space_not_archive_defect(tmp_path, monkeypatch):
+    """Regression (gap G): ENOSPC while writing the archive was reported as a
+    generic ARCHIVE failure, so the batch was not paused like for any other
+    full disk. The partial archive must still be removed."""
+    import errno
+    from videogen.core.errors import DiskSpaceError
+    entries = _files(tmp_path)
+    real_write = zipfile.ZipFile.write
+    calls = {"n": 0}
+
+    def write(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(self, *a, **k)
+    monkeypatch.setattr(zipfile.ZipFile, "write", write)
+    dest = tmp_path / "out" / "a.zip"
+    with pytest.raises(DiskSpaceError) as ei:
+        create_archive(dest, entries, max_size_bytes=10**9)
+    assert ei.value.code == "DISK_SPACE"
+    assert not dest.exists() and not list(dest.parent.glob(".*.part"))
+
+
+def test_archive_child_reports_disk_space_code(tmp_path, monkeypatch):
+    """The archive runs in a child process; the error class must survive the pipe."""
+    from videogen.core import pipeline as pl
+    from videogen.core.errors import DiskSpaceError
+    from videogen.media import archiver
+
+    def full(*a, **k):
+        raise DiskSpaceError("Недостатньо вільного місця на диску для архіву.", code="DISK_SPACE")
+    monkeypatch.setattr(archiver, "create_archive", full)
+
+    class Conn:
+        sent = []
+
+        def send(self, x):
+            self.sent.append(x)
+    pl._archive_child(Conn(), str(tmp_path / "a.zip"), [], 10**9)
+    assert Conn.sent[0]["ok"] is False and Conn.sent[0]["code"] == "DISK_SPACE"
+
+
+def _corrupt_video_payload(path: Path, every: int = 7) -> int:
+    """Overwrite the middle of some *video* packets (positions from ffprobe):
+    the container index, packet count, durations and audio stay intact; only
+    the encoded picture data is damaged."""
+    import json as _json
+    import subprocess
+    out = subprocess.run([F.FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_packets",
+                          "-show_entries", "packet=pos,size,flags", "-of", "json", str(path)],
+                         capture_output=True, check=True).stdout
+    packets = [p for p in _json.loads(out)["packets"] if "K" not in p.get("flags", "")]
+    data = bytearray(path.read_bytes())
+    hit = 0
+    for p in packets[::every]:
+        pos, size = int(p["pos"]), int(p["size"])
+        if size < 64:
+            continue
+        start = pos + 8                              # keep the NAL length prefix and header
+        for k in range(start, min(pos + size - 4, start + size // 2)):
+            data[k] = (data[k] * 31 + 0x5A) & 0xFF
+        hit += 1
+    path.write_bytes(bytes(data))
+    return hit
+
+
+def test_corrupted_bitstream_is_caught_only_by_full_decode(tmp_path):
+    """Gap L: a file whose container, packet count, codec, resolution, durations
+    and audio are all correct, but whose encoded video data is damaged. Only
+    the full decode can see it — and it must (DECODE_ERRORS)."""
+    v = tmp_path / "v.mp4"
+    F.ff("-f", "lavfi", "-i", "testsrc2=s=320x240:r=30", "-f", "lavfi", "-i", "sine=d=4:sample_rate=48000",
+         "-frames:v", "120", "-c:v", "libx264", "-preset", "medium", "-g", "60", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-ac", "2", "-shortest", str(v))
+    verify_output(F.FFMPEG, F.FFPROBE, v, expect(120), TP)            # the fixture is valid before damage
+    assert _corrupt_video_payload(v) >= 5
+    # every structural check still passes ...
+    info = verify_output(F.FFMPEG, F.FFPROBE, v, expect(120), TP, full_decode=False)
+    assert info.video_frames == 120 and info.has_audio
+    # ... and the full decode rejects it
+    with pytest.raises(VerificationError) as ei:
+        verify_output(F.FFMPEG, F.FFPROBE, v, expect(120), TP)
+    assert ei.value.code == "DECODE_ERRORS"

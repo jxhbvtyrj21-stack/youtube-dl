@@ -327,6 +327,12 @@ class StateManager:
             c.execute("UPDATE jobs SET stage=?, updated_at=? WHERE job_id=?",
                       (stage.value, utc_now(), job_id))
 
+    def set_output_file(self, job_id: str, path: str) -> None:
+        """Record the published video while the job is still running; a later
+        failure (e.g. the archive) or crash keeps the link to the artefact."""
+        with self._tx() as c:
+            c.execute("UPDATE jobs SET output_file=?, updated_at=? WHERE job_id=?", (path, utc_now(), job_id))
+
     def set_resume_point(self, job_id: str, segment_index: int) -> None:
         with self._tx() as c:
             c.execute("UPDATE jobs SET resume_from_segment=?, updated_at=? WHERE job_id=?",

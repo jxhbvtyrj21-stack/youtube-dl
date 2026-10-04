@@ -154,6 +154,7 @@ class Engine:
         known = self.state.successful_outputs()
         for _batch, out_dir, _ws in self.state.batch_dirs():
             removed = remove_stale_parts(Path(out_dir), {k for k in known})
+            removed += remove_stale_parts(Path(out_dir) / "_archive", set())
             for r in removed:
                 log.warning("removed incomplete output %s", r)
         # workspaces still needed for Resume are never cleaned, whatever was recorded

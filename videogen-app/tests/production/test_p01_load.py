@@ -33,7 +33,7 @@ def test_01_long_render(work, record, baseline, n):
     inp, out, ws = work / "in", work / "out", work / "ws"
     dur = normal_set(inp / f"long_{n}", n, seconds_per_image=1.6)
     h = EngineHarness(work / "appdata", prod_settings()).start()
-    sampler = monitor.Sampler(lambda: h.pid, work, ws, interval=5.0)
+    sampler = monitor.Sampler(lambda: h.pid, work, ws, interval=2.0)
     next_mark = [1000]
 
     def on_event(e):
@@ -60,6 +60,8 @@ def test_01_long_render(work, record, baseline, n):
     record["actual"] = (f"{job.status.value}; кадрів {got}/{want}; {elapsed / 60:.1f} хв; RSS Engine "
                         f"{usage.get('engine_rss_mb_start')}→{usage.get('engine_rss_mb_end')} МБ (макс. "
                         f"{usage.get('engine_rss_mb_max')}), нахил {usage.get('engine_rss_mb_slope_per_min')} МБ/хв; "
+                        f"дерево процесів (Engine+FFmpeg+воркери) макс. {usage.get('tree_rss_mb_max')} МБ; "
+                        f"мін. доступна RAM системи {usage.get('sys_avail_mb_min')} МБ; "
                         f"FFmpeg одночасно ≤ {usage.get('ffmpeg_procs_max')}; тимчасових файлів макс. "
                         f"{usage.get('temp_files_max')} → {usage.get('temp_files_end')}")
     assert job.status is JobStatus.SUCCESS, job.error
@@ -86,6 +88,7 @@ def test_02_sequential_jobs(work, record, baseline):
     rows = []
     engine_pids = set()
     disk0 = psutil.disk_usage(str(work)).free
+    sampler = monitor.Sampler(lambda: h.pid, work, work / "ws", interval=1.0).start()
     try:
         for i in range(n_jobs):
             inp = work / "in" / f"{i:03d}"
@@ -114,7 +117,9 @@ def test_02_sequential_jobs(work, record, baseline):
             assert ok_frames and rows[-1]["ws_files"] == 0 and rows[-1]["ffmpeg"] == 0
             assert rows[-1]["engine_children"] == 0, kids
     finally:
+        samples = sampler.stop()
         h.stop()
+    tree = monitor.summarize(samples)
     from tests.production.monitor import slope
     warm = rows[min(10, len(rows) // 3):]
     rss_slope = slope([r["job"] for r in warm], [r["engine_rss_mb"] for r in warm])
@@ -126,6 +131,10 @@ def test_02_sequential_jobs(work, record, baseline):
         "engine_handles_first": rows[0]["engine_handles"], "engine_handles_last": rows[-1]["engine_handles"],
         "handles_slope_per_job": round(handle_slope, 3),
         "disk_used_excl_outputs_last_mb": rows[-1]["disk_used_mb_excl_outputs"],
+        "engine_rss_mb_max": tree.get("engine_rss_mb_max"), "engine_peak_wset_mb": tree.get("engine_peak_wset_mb"),
+        "tree_rss_mb_max": tree.get("tree_rss_mb_max"), "tree_rss_mb_median": tree.get("tree_rss_mb_median"),
+        "sys_avail_mb_start": tree.get("sys_avail_mb_start"), "sys_avail_mb_min": tree.get("sys_avail_mb_min"),
+        "samples": tree.get("samples"),
         "per_job": rows,
     }
     record["actual"] = (f"{len(rows)}/{n_jobs} SUCCESS, усі виходи валідні; workspace 0 файлів після кожного; "

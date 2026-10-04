@@ -157,3 +157,32 @@ class InstanceLock:
             pass  # invariant-ok: closing the file releases the lock anyway
         finally:
             fh.close()
+
+
+def exit_with_parent(on_parent_death: Any = None) -> bool:
+    """For a worker started with ``multiprocessing`` (spawn): terminate this
+    process as soon as its parent (the Engine) is gone, even if the worker is
+    busy. Uses the parent sentinel of ``multiprocessing`` (a process handle on
+    Windows, a pipe on POSIX), which becomes ready exactly when the parent
+    exits — unlike ``os.getppid()``, which never changes on Windows.
+    Returns False when there is no multiprocessing parent."""
+    import multiprocessing
+    import threading
+    from multiprocessing.connection import wait
+
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return False
+    sentinel = parent.sentinel
+
+    def watch() -> None:
+        while not wait([sentinel], timeout=1.0):   # bounded wait; the loop ends with the parent
+            continue
+        try:
+            if on_parent_death is not None:
+                on_parent_death()
+        finally:
+            os._exit(70)                            # no cleanup handlers: the parent is gone
+
+    threading.Thread(target=watch, name="parent-watch", daemon=True).start()
+    return True

@@ -64,6 +64,14 @@ def orphans() -> list[str]:
     return out
 
 
+def peak_wset_mb(pid: int) -> float:
+    """OS-tracked peak working set of one process (Windows only; 0 elsewhere)."""
+    try:
+        return round(getattr(psutil.Process(pid).memory_info(), "peak_wset", 0) / MB, 1)
+    except psutil.Error:
+        return 0.0
+
+
 def tree_rss_mb(pid: int) -> float:
     try:
         root = psutil.Process(pid)
@@ -131,6 +139,7 @@ class Sampler:
             "t": round(time.monotonic() - self.t0, 1), "mark": mark,
             "engine_rss_mb": round(rss_mb(pid), 1) if pid else 0.0,
             "engine_tree_rss_mb": round(tree_rss_mb(pid), 1) if pid else 0.0,
+            "engine_peak_wset_mb": peak_wset_mb(pid) if pid else 0.0,
             "test_rss_mb": round(rss_mb(os.getpid()), 1),
             "sys_avail_mb": round(vm.available / MB),
             "cpu_pct": psutil.cpu_percent(interval=None),
@@ -176,5 +185,12 @@ def summarize(samples: list[dict], key: str = "engine_rss_mb") -> dict:
         "temp_files_end": samples[-1]["temp_files"],
         "disk_free_mb_min": min(s["disk_free_mb"] for s in samples),
         "sys_avail_mb_min": min(s["sys_avail_mb"] for s in samples),
+        "sys_avail_mb_start": samples[0]["sys_avail_mb"],
+        # sampled every `interval` s: the whole Engine process tree (Engine +
+        # FFmpeg + ImageWorker + Archiver) — short spikes between samples are missed
+        "tree_rss_mb_max": max(s.get("engine_tree_rss_mb", 0.0) for s in samples),
+        "tree_rss_mb_median": statistics.median(s.get("engine_tree_rss_mb", 0.0) for s in samples),
+        # OS-tracked peak working set of the Engine process itself (Windows)
+        "engine_peak_wset_mb": max(s.get("engine_peak_wset_mb", 0.0) for s in samples),
         "samples": len(samples),
     }

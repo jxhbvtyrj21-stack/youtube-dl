@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import zipfile
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from videogen.core.cancellation import CancellationToken
-from videogen.core.errors import ArchiveError, JobCancelledError
+from videogen.core.errors import ArchiveError, DiskSpaceError, JobCancelledError
 from videogen.storage.atomic import replace_with_retry
 
 log = logging.getLogger(__name__)
@@ -85,7 +86,12 @@ def create_archive(dest: Path, entries: list[ArchiveEntry], *, max_size_bytes: i
         return result
     except (ArchiveError, JobCancelledError):
         raise
-    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:    # Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL map here too
+            raise DiskSpaceError("Недостатньо вільного місця на диску для архіву.",
+                                 code="DISK_SPACE", detail=repr(exc)) from exc
+        raise ArchiveError("Не вдалося створити архів.", detail=repr(exc)) from exc
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         raise ArchiveError("Не вдалося створити архів.", detail=repr(exc)) from exc
     finally:
         if part.exists():

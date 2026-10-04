@@ -181,6 +181,64 @@ def test_archive_failure_marks_job_failed_but_keeps_video(dirs, engine_ctx, monk
     assert (dirs["output"] / "arc.mp4").exists()          # the verified video stays
 
 
+def test_disk_full_while_archiving_pauses_batch_and_keeps_video_linked(dirs, engine_ctx, monkeypatch):
+    """Regression (gap G): disk full while archiving, after the video was
+    published. The job is FAILED(DISK_SPACE) without retries, stays linked to
+    its verified video, says so, and the batch pauses so the next job is not
+    started on a full disk."""
+    from videogen.core import pipeline as pl
+    from videogen.core.errors import DiskSpaceError
+    real = pl._run_archive_process
+    calls = {"n": 0}
+
+    def archive(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DiskSpaceError("Недостатньо вільного місця на диску для архіву.", code="DISK_SPACE")
+        return real(*a, **k)
+    monkeypatch.setattr(pl, "_run_archive_process", archive)
+    make_job_folder(dirs["input"], "1 перший", n_images=2, audio_s=2)
+    make_job_folder(dirs["input"], "2 другий", n_images=2, audio_s=2)
+    eng, _ = make_engine(dirs)
+    engine_ctx["eng"] = eng
+    eng.start_batch(start_cmd(dirs["input"], dirs["output"], dirs["ws"]))
+    assert wait_until(lambda: eng.batch_state is BatchState.PAUSED, 120)
+    jobs = {j.name: j for j in eng.state.list_jobs()}
+    a, b = jobs["1 перший"], jobs["2 другий"]
+    video = dirs["output"] / "1 перший.mp4"
+    assert a.status is JobStatus.FAILED and (a.error.error_class, a.error.code) == ("RESOURCE", "DISK_SPACE")
+    assert a.attempts == 1
+    assert a.output_file == str(video) and video.exists() and frames_of(video) > 0
+    assert "1 перший.mp4" in a.error.message
+    assert b.status is JobStatus.QUEUED
+    eng.handle(ev.Resume())
+    assert eng.wait_idle(240)
+    assert eng.state.get_job(b.job_id).status is JobStatus.SUCCESS
+    assert_clean(dirs)
+
+
+def test_damaged_bitstream_after_mux_is_never_published(dirs, engine_ctx, monkeypatch):
+    """Gap L, pipeline level: the muxed file keeps a valid container and the
+    exact packet count but carries damaged picture data. The job must fail
+    with DECODE_ERRORS (after its one verification retry) and publish nothing."""
+    from videogen.core import pipeline as pl
+    from tests.media.test_audio_video import _corrupt_video_payload
+    real = pl.MediaPipeline._mux
+
+    def mux(self, run, tl, audio):
+        real(self, run, tl, audio)
+        assert _corrupt_video_payload(run.ws.temp_output(), every=3) >= 1
+    monkeypatch.setattr(pl.MediaPipeline, "_mux", mux)
+    make_job_folder(dirs["input"], "биті дані", n_images=3, audio_s=6)
+    eng, _ = make_engine(dirs)
+    engine_ctx["eng"] = eng
+    job = run_batch(eng, dirs)["биті дані"]
+    assert job.status is JobStatus.FAILED and job.error.code == "DECODE_ERRORS", job.error
+    assert job.attempts == 2                                   # one verification retry, then FAILED
+    assert not list(dirs["output"].glob("*.mp4"))
+    assert_clean(dirs)
+
+
 def test_archive_size_limit_skips_with_warning(dirs, engine_ctx, monkeypatch):
     from videogen.core import pipeline as pl
     monkeypatch.setattr(pl, "estimate_size", lambda entries: 5 * 1024 * 1024)
