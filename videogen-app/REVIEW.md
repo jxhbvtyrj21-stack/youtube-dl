@@ -58,6 +58,45 @@
 7. Три тести мали помилки, специфічні для Windows (читання JSON без явного
    UTF-8, вплив змінної `VIDEOGEN_FFMPEG_DIR` у CI) — виправлено.
 
+## Знайдено серією production stress / failure testing
+
+Кожна проблема спершу відтворена на старому коді, потім усунена причина,
+потім додано регресійний тест (на старому коді він падає).
+
+8. **Заблокована база стану переносилася в карантин як «пошкоджена»** —
+   уся історія завдань, включно з перерваними, зникала. Причина: будь-яка
+   `sqlite3.DatabaseError` трактувалася як пошкодження, хоча
+   `OperationalError: database is locked` — тимчасовий стан. Тепер:
+   обмежене очікування і зрозуміла помилка `StateLockedError`; карантин лише
+   для справжнього пошкодження. Тести: `test_locked_database_is_not_mistaken_for_corruption`,
+   production #10b.
+9. **Один пошкоджений JSON у записі job ламав запуск Engine.** Тепер запис
+   пропускається з помилкою в журналі (`corrupt_rows`), решта працює.
+   Тест: `test_invalid_json_row_does_not_break_startup`.
+10. **«No space left on device» від FFmpeg вважалося збоєм FFmpeg** (з
+    марною повторною спробою і без паузи пакета). Тепер — `DiskSpaceError`.
+    Тест: `test_disk_full_is_classified_as_disk_space_not_crash`.
+11. **Витік 2 дескрипторів на кожен job і фальшивий код виходу 0.**
+    `kill_tree` через `psutil.wait_procs()` сам викликав `waitpid()` для наших
+    прямих дочірніх процесів: `subprocess.Popen` після цього повідомляв
+    returncode 0 для вбитого процесу, а `multiprocessing` назавжди лишав
+    Process у реєстрі «живих» разом із його pipe-ами. Крім того, процес
+    архівування вбивався одразу після успішного звіту, не встигнувши
+    завершитися. Тепер `kill_tree` лише спостерігає за власними дочірніми
+    процесами (збирає їх власник), архіватору дається час завершитися.
+    Тести: `test_kill_tree_leaves_exit_status_to_the_owner`,
+    `test_kill_tree_on_multiprocessing_child_does_not_leak`,
+    `test_archive_process_does_not_leak_handles`,
+    `test_engine_sequential_jobs_do_not_leak_handles`, production #2.
+12. **Аварійне зникнення GUI знищувало можливість відновлення.** Engine
+    коректно зупинявся, але позначав завдання CANCELLED і видаляв workspace.
+    Причина: скасування мало лише одну семантику. Тепер `CancellationToken`
+    розрізняє рішення користувача (CANCELLED) і переривання через зникнення
+    програми (INTERRUPTED, workspace зберігається, після запуску —
+    Resume/Retry/Ignore); не розпочаті завдання мертвого сеансу теж стають
+    INTERRUPTED. Тести: `test_interrupt_keeps_jobs_resumable`,
+    `test_gui_loss_leaves_job_resumable_with_workspace`, production #6, #8, #9.
+
 ## Відомі обмеження
 
 * Код Windows Job Objects, маніфест і EXE перевіряються лише в CI на
