@@ -87,6 +87,12 @@ class ArchiveError(VideoGenError):
     default_code = "ARCHIVE_FAILED"
 
 
+class StateLockedError(VideoGenError):
+    """The state database is held by another program (not corrupt!)."""
+    error_class = ErrorClass.INTERNAL
+    default_code = "STATE_LOCKED"
+
+
 class AlreadyRunningError(VideoGenError):
     error_class = ErrorClass.INTERNAL
     default_code = "ALREADY_RUNNING"

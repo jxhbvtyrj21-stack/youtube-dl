@@ -1,0 +1,82 @@
+name: VideoGen production stress (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "full | quick"
+        default: "full"
+  push:
+    paths:
+      - "videogen-app/tests/production/**"
+      - ".github/workflows/videogen-production-stress.yml"
+
+defaults:
+  run:
+    working-directory: videogen-app
+    shell: pwsh
+
+jobs:
+  production-stress:
+    runs-on: windows-latest
+    timeout-minutes: 350
+    env:
+      VIDEOGEN_PROD_SCALE: ${{ github.event.inputs.scale || 'full' }}
+      VIDEOGEN_PROD_DIR: ${{ github.workspace }}\..\vgprod
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -e ".[media,gui,dev]"
+      - name: Fetch FFmpeg
+        run: |
+          ./packaging/fetch_ffmpeg.ps1
+          "$PWD\packaging\third_party\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Create a small real volume for the disk-space test (VHD 400 MB -> R:)
+        continue-on-error: true
+        run: |
+          $vhd = "$env:RUNNER_TEMP\small.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=400 type=expandable
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=VGSMALL
+          assign letter=R
+          "@ | Set-Content "$env:RUNNER_TEMP\dp.txt" -Encoding ascii
+          diskpart /s "$env:RUNNER_TEMP\dp.txt"
+          if (Test-Path R:\) { "VIDEOGEN_SMALL_DISK=R:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8; Get-PSDrive R }
+      - name: Machine before
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, TotalVisibleMemorySize, FreePhysicalMemory | Format-List
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+      - name: Production stress / failure suite
+        id: suite
+        continue-on-error: true
+        env:
+          VIDEOGEN_FFMPEG_DIR: ${{ github.workspace }}\videogen-app\packaging\third_party\ffmpeg
+        run: python -m pytest -m production tests/production -v -rA --timeout=0 -p no:cacheprovider
+      - name: Windows process list after the suite
+        if: always()
+        run: |
+          Get-Process | Where-Object { $_.ProcessName -match '^(ffmpeg|ffprobe|VideoGen|python)' } |
+            Format-Table Id, ProcessName, StartTime, WorkingSet64 -AutoSize
+      - name: Build STRESS_TEST_REPORT.md
+        if: always()
+        run: |
+          $cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+          $ram = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize / 1MB, 1)
+          python tests/production/report.py STRESS_TEST_REPORT.md "GitHub Actions windows-latest; $cpu; RAM $ram GB; scale $env:VIDEOGEN_PROD_SCALE; run ${{ github.run_id }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-stress-report
+          path: |
+            videogen-app/STRESS_TEST_REPORT.md
+            videogen-app/tests/production/reports/
+      - name: Fail if the suite failed
+        if: steps.suite.outcome != 'success'
+        run: exit 1

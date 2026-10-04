@@ -26,12 +26,14 @@ class CancellationToken:
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._reason = ""
+        self._interrupt = False
         self._callbacks: dict[int, Callable[[], None]] = {}
         self._ids = itertools.count(1)
         self._parent = parent
         self._parent_handle: int | None = None
         if parent is not None:
-            self._parent_handle = parent.register(lambda: self.cancel(parent.reason))
+            self._parent_handle = parent.register(
+                lambda: self.cancel(parent.reason, interrupt=parent.interrupted))
 
     @property
     def reason(self) -> str:
@@ -41,11 +43,18 @@ class CancellationToken:
     def cancelled(self) -> bool:
         return self._event.is_set()
 
-    def cancel(self, reason: str = "cancelled") -> None:
+    @property
+    def interrupted(self) -> bool:
+        """True when work stops for a reason other than the user's decision
+        (GUI lost, application shutting down): the job must stay resumable."""
+        return self._interrupt
+
+    def cancel(self, reason: str = "cancelled", *, interrupt: bool = False) -> None:
         with self._lock:
             if self._event.is_set():
                 return
             self._reason = reason
+            self._interrupt = interrupt
             self._event.set()
             callbacks = list(self._callbacks.values())
         for cb in callbacks:

@@ -109,3 +109,26 @@ def test_locator_rejects_broken_binary(monkeypatch, tmp_path):
     monkeypatch.delenv("VIDEOGEN_FFMPEG_DIR", raising=False)
     with pytest.raises(FFmpegUnavailableError):
         locate()
+
+
+def test_kill_tree_leaves_exit_status_to_the_owner():
+    """Regression: kill_tree must not reap our own child (Popen would then
+    report returncode 0 for a killed process)."""
+    import subprocess
+    p = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"])
+    kill_tree(p.pid, wait_s=5)
+    rc = p.wait(timeout=5)
+    assert rc != 0                      # -9 on POSIX, 1 on Windows — never a fake success
+
+
+def test_kill_tree_on_multiprocessing_child_does_not_leak():
+    import multiprocessing
+    import time as _t
+    from multiprocessing import process as mp_process
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(target=_t.sleep, args=(60,))
+    p.start()
+    kill_tree(p.pid, wait_s=5)
+    p.join(5)
+    assert p.exitcode is not None and p not in mp_process._children
+    p.close()

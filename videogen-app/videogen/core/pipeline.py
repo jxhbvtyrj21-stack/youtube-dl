@@ -58,6 +58,55 @@ from videogen.workers.resource_monitor import check_disk, estimate_job_disk
 log = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL_S = 0.2
+
+
+def _test_hook(name: str) -> str:
+    """Fault injection for the production failure suite. Inactive unless
+    VIDEOGEN_TEST_HOOKS=1 is set explicitly (never in normal use). A value
+    may be given directly (VIDEOGEN_TEST_<NAME>) or via a control file
+    (VIDEOGEN_TEST_<NAME>_FILE) so a running engine can be steered."""
+    if os.environ.get("VIDEOGEN_TEST_HOOKS") != "1":
+        return ""
+    ctl = os.environ.get(f"VIDEOGEN_TEST_{name}_FILE")
+    if ctl:
+        try:
+            return Path(ctl).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return os.environ.get(f"VIDEOGEN_TEST_{name}", "")
+
+
+def _stall_requested(spec: str, job_name: str, index: int) -> bool:
+    """Spec "<index>" or "<job-name substring>:<index>"."""
+    if not spec:
+        return False
+    name, _, idx = spec.rpartition(":")
+    return idx == str(index) and (not name or name in job_name)
+
+
+def _stalling_ffmpeg(ffmpeg: str) -> list[str]:
+    """A real ffmpeg that waits forever for input on stdin: alive, no progress."""
+    return [ffmpeg, "-hide_banner", "-v", "warning", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "64x64",
+            "-i", "pipe:0", "-f", "null", "-", "-progress", "pipe:1", "-nostats"]
+
+
+def _corrupt_output(mode: str, path: Path, ffmpeg: str) -> None:
+    import subprocess
+    if mode == "missing":
+        path.unlink(missing_ok=True)
+    elif mode == "zero":
+        path.write_bytes(b"")
+    elif mode == "invalid":
+        path.write_bytes(os.urandom(200_000))
+    elif mode == "incomplete":
+        data = path.read_bytes()
+        path.write_bytes(data[: len(data) // 2])
+    elif mode in ("noaudio", "duration"):
+        tmp = path.with_name("hook.tmp.mp4")
+        extra = ["-an"] if mode == "noaudio" else ["-t", "1"]
+        subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(path), "-c", "copy", *extra, str(tmp)],
+                       check=True, timeout=120, stdin=subprocess.DEVNULL)
+        os.replace(tmp, path)
 STAGE_WEIGHTS: dict[Stage, tuple[float, float]] = {
     Stage.VALIDATING: (0, 1), Stage.GENERATING: (1, 5), Stage.AUDIO: (5, 8),
     Stage.NORMALIZING: (8, 25), Stage.TIMELINE: (25, 25), Stage.RENDERING: (25, 90),
@@ -179,6 +228,13 @@ class MediaPipeline:
             return
         m = run.manifest
         m.status, m.end_time, m.error = final.status, utc_now(), final.error
+        if final.status is JobStatus.INTERRUPTED:
+            # resumable: keep the workspace (verified images/segments) and the job log
+            self._save(run)
+            if self.env.log_system is not None:
+                self.env.log_system.close_job_log(ctx.job_id)
+            log.warning("job interrupted; workspace kept for resume", extra={"job_id": ctx.job_id})
+            return
         m.stage = Stage.CLEANUP
         self._save(run)
         keep_diag = final.status is not JobStatus.SUCCESS or self.s.logging.keep_job_logs
@@ -247,6 +303,10 @@ class MediaPipeline:
         if reuse is None:
             ctx.stage(Stage.MUXING)
             self._mux(run, tl, audio)
+            corrupt = _test_hook("CORRUPT_OUTPUT")
+            if corrupt:
+                log.warning("TEST HOOK: corrupting output (%s)", corrupt, extra={"job_id": run.cfg.job_id})
+                _corrupt_output(corrupt, out_tmp, self.env.tools.ffmpeg)
             ctx.stage(Stage.VERIFYING)
             info = verify_output(self.env.tools.ffmpeg, self.env.tools.ffprobe, out_tmp, self._expected(cfg, tl),
                                  self.s.timeouts, ctx.token)
@@ -469,6 +529,10 @@ class MediaPipeline:
                 image=valid[seg.image_index].normalized_path,
                 prev_image=valid[prev.image_index].normalized_path if (prev and seg.transition_in) else None,
                 out=str(tmp.relative_to(ws.root)), s=enc)
+            if _stall_requested(_test_hook("STALL_SEGMENT"), run.cfg.name, seg.index):
+                argv = _stalling_ffmpeg(self.env.tools.ffmpeg)
+                log.warning("TEST HOOK: segment %d replaced by a stalling ffmpeg", seg.index + 1,
+                            extra={"job_id": run.cfg.job_id})
             fps_min = timeouts.calibrated_fps_min(tp, self._measured_fps)
             lim = timeouts.segment_render(tp, seg.frames + seg.transition_in, fps_min)
             base = done_frames
@@ -494,6 +558,9 @@ class MediaPipeline:
                 log.info("calibrated render speed %.1f fps", self._measured_fps,
                          extra={"job_id": run.cfg.job_id, "stage": "RENDERING"})
             rec.status, rec.size = "DONE", final.stat().st_size
+            log.info("segment %d/%d rendered: %d frames in %.1fs", seg.index + 1, n, seg.frames, elapsed,
+                     extra={"job_id": run.cfg.job_id, "stage": "RENDERING", "event": "segment_done",
+                            "duration_ms": int(elapsed * 1000)})
             done_frames += seg.frames
             self._save(run)
             self.env.state.set_resume_point(run.cfg.job_id, seg.index + 1)
@@ -688,11 +755,19 @@ def _run_archive_process(dest: Path, entries: list[ArchiveEntry], max_bytes: int
             if v is not None:
                 raise ArchiveError(f"Архівування зависло ({v.kind}).", code="ARCHIVE_TIMEOUT")
     finally:
+        if result is not None:
+            # The child reported its result and is exiting normally: let it
+            # finish instead of killing a healthy process.
+            proc.join(timeout=s.timeouts.terminate_wait_s * 3)
         if proc.is_alive():
             kill_tree(proc.pid, wait_s=5)
         proc.join(timeout=5)
         REGISTRY.remove(proc.pid)
         parent.close()
+        try:
+            proc.close()                  # releases the sentinel pipe immediately
+        except ValueError:
+            log.error("archiver process %s could not be reaped", proc.pid)
         if result is None or not result.get("ok"):
             part.unlink(missing_ok=True)
     if result is None:

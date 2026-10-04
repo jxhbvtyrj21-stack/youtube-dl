@@ -299,9 +299,11 @@ class Engine:
     def wait_idle(self, timeout: float) -> bool:
         return self.queue.wait(timeout) if self.queue else True
 
-    def shutdown(self, timeout: float = 20.0) -> None:
+    def shutdown(self, timeout: float = 20.0, *, interrupt: bool = False) -> None:
+        """``interrupt=True`` when the GUI vanished: unfinished jobs stay
+        resumable (INTERRUPTED) instead of being cancelled."""
         if self.queue is not None and self.queue.batch_state is not BatchState.IDLE:
-            self.queue.stop("Програму закрито.")
+            self.queue.stop("GUI завершився аварійно" if interrupt else "Програму закрито.", interrupt=interrupt)
             self.queue.wait(timeout)
         survivors = REGISTRY.kill_all()
         if survivors:

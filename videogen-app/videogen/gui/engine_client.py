@@ -34,7 +34,12 @@ class EngineClient:
         self._proc: Any = None
         self._commands: Any = None
         self._events: Any = None
-        self._job = JobObject("engine")
+        # VIDEOGEN_TEST_NO_JOB_OBJECT=1 (tests only): exercise the engine's own
+        # "GUI is gone" shutdown path without the OS-level safety net.
+        self._job = JobObject("engine" if os.environ.get("VIDEOGEN_TEST_NO_JOB_OBJECT") != "1" else "disabled")
+        if os.environ.get("VIDEOGEN_TEST_NO_JOB_OBJECT") == "1":
+            self._job.close()
+            self._job.supported = False
         self.started_at = 0.0
         self.restarts = 0
 

@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from typing import Any
 
 import psutil
@@ -41,12 +42,42 @@ def _tree(pid: int) -> list[psutil.Process]:
     return [root, *children]
 
 
+def _wait_gone(procs: list[psutil.Process], timeout: float) -> list[psutil.Process]:
+    """Wait until processes are dead WITHOUT reaping our own direct children.
+
+    psutil.wait_procs() calls waitpid() for children of the current process;
+    that steals the exit status from the object that owns the child
+    (subprocess.Popen / multiprocessing.Process): Popen then reports
+    returncode 0 for a killed process and multiprocessing keeps the Process
+    in its children registry forever (leaking its pipes). Our own children
+    are therefore only observed (dead or zombie) and left for their owner
+    to reap.
+    """
+    me = os.getpid()
+    own, other = [], []
+    for p in procs:
+        try:
+            (own if p.ppid() == me else other).append(p)
+        except psutil.Error:
+            continue
+    alive_other: list[psutil.Process] = []
+    if other:
+        _gone, alive_other = psutil.wait_procs(other, timeout=timeout)
+    deadline = time.monotonic() + timeout
+    alive_own = [p for p in own if _is_alive(p)]
+    while alive_own and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive_own = [p for p in alive_own if _is_alive(p)]
+    return alive_other + alive_own
+
+
 def kill_tree(pid: int, *, wait_s: float = 5.0, graceful_s: float = 0.0) -> list[int]:
     """Terminate ``pid`` and all its descendants. Returns PIDs still alive.
 
     Order: optional graceful terminate (``graceful_s`` > 0) -> kill. Children
     are snapshotted *before* the parent dies (afterwards they are reparented
-    and no longer discoverable from the parent).
+    and no longer discoverable from the parent). Never reaps our own direct
+    children (see :func:`_wait_gone`).
     """
     procs = _tree(pid)
     if not procs:
@@ -57,8 +88,7 @@ def kill_tree(pid: int, *, wait_s: float = 5.0, graceful_s: float = 0.0) -> list
                 p.terminate()
             except psutil.Error:
                 continue
-        _gone, alive = psutil.wait_procs(procs, timeout=graceful_s)
-        procs = alive
+        procs = _wait_gone(procs, graceful_s)
     if os.name != "nt":
         # Only kill the process *group* if pid leads its own group (started
         # with start_new_session). Otherwise the group is ours and killpg
@@ -73,7 +103,7 @@ def kill_tree(pid: int, *, wait_s: float = 5.0, graceful_s: float = 0.0) -> list
             p.kill()
         except psutil.Error:
             continue
-    _gone, alive = psutil.wait_procs(procs, timeout=wait_s)
+    alive = _wait_gone(procs, wait_s)
     survivors = [p.pid for p in alive if _is_alive(p)]
     if survivors:
         log.critical("processes survived kill: %s", survivors)

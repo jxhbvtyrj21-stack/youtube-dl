@@ -385,5 +385,19 @@ def raise_for(run: FFmpegRun, what: str) -> None:
         raise OperationTimeoutError(f"{what}: {kind}.", code=run.verdict.kind.upper(),
                                     detail=run.result.stderr_tail[-2000:])
     if run.result.returncode != 0:
+        if _disk_full(run.result.stderr_tail):
+            # not a crash: retrying cannot help and the batch must pause
+            from videogen.core.errors import DiskSpaceError
+            raise DiskSpaceError(f"{what}: недостатньо вільного місця на диску.", code="DISK_SPACE",
+                                 detail=run.result.stderr_tail[-2000:])
         raise FFmpegCrashError(f"{what}: FFmpeg завершився з помилкою (код {run.result.returncode}).",
                                detail=run.result.stderr_tail[-2000:])
+
+
+_DISK_FULL_MARKERS = ("no space left on device", "not enough space on the disk", "disk full",
+                      "there is not enough space")
+
+
+def _disk_full(stderr: str) -> bool:
+    low = stderr.lower()
+    return any(m in low for m in _DISK_FULL_MARKERS)

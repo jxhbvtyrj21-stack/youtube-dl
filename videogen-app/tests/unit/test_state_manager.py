@@ -74,15 +74,16 @@ def test_running_jobs_become_interrupted_after_restart(tmp_path):
 
     s2 = StateManager(tmp_path / "state.db")
     interrupted = s2.mark_running_as_interrupted()
-    assert sorted(interrupted) == sorted([ids[0], ids[2]])
+    # QUEUED from a dead session is also interrupted (the queue was in memory)
+    assert sorted(interrupted) == sorted([ids[0], ids[2], ids[3]])
     assert s2.get_job(ids[0]).status is JobStatus.INTERRUPTED
     assert s2.get_job(ids[1]).status is JobStatus.SUCCESS      # finished output untouched
     assert s2.get_job(ids[1]).output_file == "/out/1.mp4"
-    assert s2.get_job(ids[3]).status is JobStatus.QUEUED
+    assert s2.get_job(ids[3]).status is JobStatus.INTERRUPTED
     # recovery choices
     s2.transition(ids[0], JobStatus.QUEUED)                     # Resume/Retry
     s2.transition(ids[2], JobStatus.CANCELLED)                  # Ignore
-    assert s2.mark_running_as_interrupted() == []
+    assert s2.counters().running == 0
     s2.close()
 
 

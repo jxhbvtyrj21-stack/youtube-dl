@@ -157,3 +157,38 @@ def test_engine_exits_even_if_nobody_reads_events(tmp_path):
     if alive:
         p.kill()
     assert not alive, "engine hung on exit with an unread event queue"
+
+
+def test_gui_loss_leaves_job_resumable_with_workspace(tmp_path):
+    """Regression (production tests 6/9): graceful engine shutdown because the
+    GUI vanished must keep the job resumable — and Resume must reuse work."""
+    import dataclasses
+    from tests.pipeline_support import make_job_folder, small_settings, start_cmd
+    from tests.helpers import wait_until
+    from videogen.core import pipeline as pl
+    d = {k: tmp_path / k for k in ("input", "output", "ws", "appdata")}
+    make_job_folder(d["input"], "довгий", n_images=8, audio_s=16)
+    s = small_settings(video=dataclasses.replace(small_settings().video, preset="medium"))
+    eng = Engine(d["appdata"], s, lambda e: None)
+    eng.startup()
+    eng.start_batch(ev.StartBatch("A", "16:9", str(d["input"]), str(d["output"]), str(d["ws"])))
+    assert wait_until(lambda: (eng.state.list_jobs() or [None])[0] is not None
+                      and eng.state.list_jobs()[0].resume_from_segment >= 2, 120)
+    eng.shutdown(interrupt=True)
+    eng2 = Engine(d["appdata"], s, lambda e: None)
+    calls = []
+    real = pl.run_ffmpeg
+    pl.run_ffmpeg = lambda argv, **kw: (calls.append(kw.get("label")), real(argv, **kw))[1]
+    try:
+        interrupted = eng2.startup()
+        assert [j.name for j in interrupted] == ["довгий"]
+        point = interrupted[0].resume_from_segment
+        assert point >= 2
+        assert list(d["ws"].rglob("s0000*.mp4"))           # verified segments were kept
+        eng2.recover(interrupted[0].job_id, RecoveryAction.RESUME)
+        assert eng2.wait_idle(300)
+        assert eng2.state.get_job(interrupted[0].job_id).status is JobStatus.SUCCESS
+        assert len([c for c in calls if c and c.startswith("ffmpeg-seg")]) == 8 - point
+    finally:
+        pl.run_ffmpeg = real
+        eng2.shutdown()

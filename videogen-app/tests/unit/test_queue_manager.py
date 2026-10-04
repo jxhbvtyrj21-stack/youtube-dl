@@ -218,3 +218,28 @@ def test_pause_during_resource_wait_does_not_start_job(state):
     qm.stop()
     assert qm.wait(5)
     assert statuses(state, ids) == [JobStatus.CANCELLED, JobStatus.CANCELLED]
+
+
+def test_interrupt_keeps_jobs_resumable(state):
+    """Regression (production tests 6/9): when the application goes away
+    (GUI lost) jobs must become INTERRUPTED, not CANCELLED."""
+    ids = add_jobs(state, 3)
+    ex = FakeExecutor(script={"job000": ["block"]})
+    qm, rec = make_qm(state, ex)
+    qm.start(ids)
+    assert wait_until(lambda: qm.active_jobs == [ids[0]], 5)
+    qm.stop("GUI завершився аварійно", interrupt=True)
+    assert qm.wait(5)
+    assert statuses(state, ids) == [JobStatus.INTERRUPTED] * 3
+    assert ex.finalized == [("job000", JobStatus.INTERRUPTED)]
+    assert "продовжити" in state.get_job(ids[0]).error.message
+
+
+def test_user_stop_still_cancels(state):
+    ids = add_jobs(state, 2)
+    qm, _ = make_qm(state, FakeExecutor(script={"job000": ["block"]}))
+    qm.start(ids)
+    assert wait_until(lambda: qm.active_jobs == [ids[0]], 5)
+    qm.stop()
+    assert qm.wait(5)
+    assert statuses(state, ids) == [JobStatus.CANCELLED] * 2

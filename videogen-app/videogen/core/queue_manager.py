@@ -128,7 +128,9 @@ class QueueManager:
                     self._batch_state = BatchState.PAUSED  # collapse PAUSING->PAUSED->RUNNING
                 self._set_state(BatchState.RUNNING)
 
-    def stop(self, reason: str = "Зупинено користувачем.") -> None:
+    def stop(self, reason: str = "Зупинено користувачем.", *, interrupt: bool = False) -> None:
+        """``interrupt=True``: the application is going away (not a user
+        decision) — running and pending jobs become INTERRUPTED (resumable)."""
         with self._lock:
             if self._batch_state in (BatchState.IDLE, BatchState.STOPPING, BatchState.STOPPED,
                                      BatchState.COMPLETED):
@@ -137,7 +139,7 @@ class QueueManager:
             self._set_state(BatchState.STOPPING, reason)
             self._pause.release()
         # cancels all job tokens (children of the batch token) -> kills subprocesses
-        self._batch_token.cancel(reason)
+        self._batch_token.cancel(reason, interrupt=interrupt)
 
     def cancel_current(self) -> list[str]:
         with self._lock:
@@ -256,8 +258,14 @@ class QueueManager:
             leftover = list(self._pending)
             self._pending.clear()
             stopped = self._batch_token.cancelled
+        interrupted = self._batch_token.interrupted
         for job_id in leftover:
             try:
+                if interrupted:
+                    self.state.transition(job_id, JobStatus.INTERRUPTED, error=ErrorInfo(
+                        ErrorClass.CANCELLED.value, "INTERRUPTED",
+                        f"Не розпочато ({self._stop_reason}). Можна продовжити після запуску програми."))
+                    continue
                 self.state.transition(job_id, JobStatus.CANCELLED, error=JobCancelledError(
                     self._stop_reason or "Пакет зупинено.").to_info())
             except Exception:  # noqa: BLE001

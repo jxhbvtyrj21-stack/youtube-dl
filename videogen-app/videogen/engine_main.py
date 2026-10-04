@@ -70,12 +70,14 @@ def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dic
     for w in warnings:
         log.warning("settings: %s", w)
     stop = threading.Event()
+    gui_lost = threading.Event()
 
     def heartbeat() -> None:
         while not stop.wait(HEARTBEAT_S):
             sink(ev.Heartbeat(time.time(), engine.batch_state))
             if not _alive(parent_pid):
                 log.error("GUI process %s is gone; engine shutting down", parent_pid)
+                gui_lost.set()
                 stop.set()
 
     hb = threading.Thread(target=heartbeat, name="heartbeat", daemon=True)
@@ -99,7 +101,8 @@ def engine_main(commands_q: Any, events_q: Any, appdata: str, settings_data: dic
                 sink(ev.EngineError(time.time(), "Внутрішня помилка під час виконання команди.", repr(exc)))
     finally:
         stop.set()
-        engine.shutdown()
+        log.info("engine exiting; undelivered GUI events dropped: %d", sink.dropped)
+        engine.shutdown(interrupt=gui_lost.is_set())
         # If the GUI is gone nobody drains events_q; without this the queue's
         # feeder thread would block interpreter exit forever on a full pipe.
         try:

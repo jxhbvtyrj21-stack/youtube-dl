@@ -103,7 +103,7 @@ class JobManager:
         try:
             for _ in range(self.max_attempts()):
                 if token.cancelled:
-                    final = self.state.transition(job_id, JobStatus.CANCELLED, error=JobCancelledError().to_info())
+                    final = self._stopped(job_id, token)
                     break
                 if job.attempts >= HARD_ATTEMPT_CAP:
                     err = ErrorInfo(ErrorClass.INTERNAL.value, "TOO_MANY_ATTEMPTS",
@@ -121,14 +121,13 @@ class JobManager:
                          extra={"job_id": job_id, "event": "attempt_start"})
                 try:
                     outcome = self.executor.execute(ctx)
-                except JobCancelledError as exc:
-                    final = self.state.transition(job_id, JobStatus.CANCELLED, error=exc.to_info())
+                except JobCancelledError:
+                    final = self._stopped(job_id, token)
                     break
                 except Exception as exc:  # noqa: BLE001 - every failure is classified
                     info = classify(exc)
                     if token.cancelled:
-                        final = self.state.transition(job_id, JobStatus.CANCELLED,
-                                                      error=JobCancelledError().to_info())
+                        final = self._stopped(job_id, token)
                         break
                     cls = ErrorClass(info.error_class)
                     used[cls] += 1
@@ -143,8 +142,7 @@ class JobManager:
                         self.executor.prepare_retry(ctx, info)
                         delay = self._backoff(cls, used[cls])
                         if delay > 0 and self._sleep(token, delay):
-                            final = self.state.transition(job_id, JobStatus.CANCELLED,
-                                                          error=JobCancelledError().to_info())
+                            final = self._stopped(job_id, token)
                             break
                         continue
                     final = self.state.transition(job_id, JobStatus.FAILED, error=info)
@@ -185,6 +183,15 @@ class JobManager:
                     self.executor.finalize(ctx, final or self.state.get_job(job_id))
                 except Exception:  # noqa: BLE001 - finalize must never mask the result
                     log.exception("finalize failed", extra={"job_id": job_id})
+
+    def _stopped(self, job_id: str, token: CancellationToken) -> JobState:
+        """CANCELLED for a user decision; INTERRUPTED (resumable, workspace
+        kept) when the application itself is going away."""
+        if token.interrupted:
+            return self.state.transition(job_id, JobStatus.INTERRUPTED, error=ErrorInfo(
+                ErrorClass.CANCELLED.value, "INTERRUPTED",
+                f"Обробку перервано ({token.reason}). Її можна продовжити після запуску програми."))
+        return self.state.transition(job_id, JobStatus.CANCELLED, error=JobCancelledError().to_info())
 
     def _backoff(self, cls: ErrorClass, n: int) -> float:
         if cls is ErrorClass.TRANSIENT:

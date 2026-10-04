@@ -274,12 +274,20 @@ runtime-ситуація; тест перевіряє всю таблицю).
 
 | З | До |
 |---|---|
-| QUEUED | RUNNING, CANCELLED |
+| QUEUED | RUNNING, CANCELLED, INTERRUPTED |
 | RUNNING | SUCCESS, PARTIAL, FAILED, CANCELLED, INTERRUPTED, RETRY_PENDING |
 | RETRY_PENDING | RUNNING, QUEUED, CANCELLED, INTERRUPTED |
 | INTERRUPTED | QUEUED (Resume/Retry), CANCELLED (Ignore) |
 | FAILED, PARTIAL, CANCELLED | QUEUED (лише ручна дія «Retry») |
 | SUCCESS | — (абсолютно термінальний) |
+
+**CANCELLED проти INTERRUPTED.** CANCELLED — лише рішення користувача (STOP,
+CANCEL CURRENT JOB): тимчасові файли видаляються. Якщо ж робота зупиняється не
+з волі користувача (GUI аварійно зник, програму вбито, вимкнулося живлення),
+поточні й ще не розпочаті завдання стають INTERRUPTED: workspace із
+перевіреними зображеннями та фрагментами зберігається, і після запуску
+програма пропонує Resume / Retry / Ignore. Механізм — прапорець `interrupt`
+у `CancellationToken`, який передається від пакета до кожного job.
 
 `SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED` — термінальні для автоматики:
 змінити їх може лише явна дія користувача. Ручний Retry для PARTIAL

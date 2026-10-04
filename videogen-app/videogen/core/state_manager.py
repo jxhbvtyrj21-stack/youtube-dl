@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from videogen.core.errors import StateLockedError
 from videogen.core.models import (
     ErrorInfo, JobConfig, JobState, JobStatus, Stage, check_transition,
 )
@@ -30,6 +31,17 @@ from videogen.storage.manifest import utc_now
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+LOCK_RETRY_S = 0.5
+
+__all__ = ["StateManager", "StateLockedError", "Counters", "OpenReport"]
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """'database is locked' / 'busy' is a transient condition, never corruption."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -91,17 +103,19 @@ class Counters:
 
 
 class StateManager:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, lock_wait_s: float = 10.0) -> None:
         self.db_path = Path(db_path)
+        self.lock_wait_s = lock_wait_s
         self._lock = threading.RLock()
         self.open_report = OpenReport()
+        self.corrupt_rows: list[str] = []
         self._conn = self._open()
 
     # ------------------------------------------------------------ opening
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0, isolation_level=None,
-                               check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=min(10.0, max(0.1, self.lock_wait_s)),
+                               isolation_level=None, check_same_thread=False)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
@@ -115,31 +129,46 @@ class StateManager:
 
     def _open(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn: sqlite3.Connection | None = None
-        try:
-            conn = self._connect()
-            ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-            if not ok:
-                raise sqlite3.DatabaseError("integrity_check failed")
-            conn.executescript(_SCHEMA)
-            conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)",
-                         (str(SCHEMA_VERSION),))
-            return conn
-        except sqlite3.DatabaseError as exc:
-            if conn is not None:
-                conn.close()
-            corrupt = self.db_path.with_name(f"{self.db_path.name}.corrupt-{int(time.time())}")
-            log.critical("state database %s is corrupt (%r); moved to %s", self.db_path, exc, corrupt)
-            for suffix in ("", "-wal", "-shm"):
-                src = Path(str(self.db_path) + suffix)
-                if src.exists():
-                    replace_with_retry(src, Path(str(corrupt) + suffix))
-            self.open_report = OpenReport(True, str(corrupt))
-            conn = self._connect()
-            conn.executescript(_SCHEMA)
-            conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)",
-                         (str(SCHEMA_VERSION),))
-            return conn
+        deadline = time.monotonic() + self.lock_wait_s
+        for _ in range(int(self.lock_wait_s / LOCK_RETRY_S) + 2):
+            conn: sqlite3.Connection | None = None
+            try:
+                conn = self._connect()
+                ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                if not ok:
+                    raise sqlite3.DatabaseError("integrity_check failed")
+                conn.executescript(_SCHEMA)
+                conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)",
+                             (str(SCHEMA_VERSION),))
+                return conn
+            except sqlite3.DatabaseError as exc:
+                if conn is not None:
+                    conn.close()
+                if _is_lock_error(exc):
+                    # Locked by another program: wait (bounded), never quarantine
+                    if time.monotonic() >= deadline:
+                        raise StateLockedError(
+                            "База стану програми заблокована іншою програмою (антивірус, резервне "
+                            "копіювання або інший екземпляр). Закрийте її та запустіть VideoGen знову.",
+                            detail=repr(exc)) from exc
+                    time.sleep(LOCK_RETRY_S)
+                    continue
+                return self._quarantine_and_recreate(exc)
+        raise StateLockedError("База стану програми заблокована іншою програмою.")
+
+    def _quarantine_and_recreate(self, exc: BaseException) -> sqlite3.Connection:
+        corrupt = self.db_path.with_name(f"{self.db_path.name}.corrupt-{int(time.time())}")
+        log.critical("state database %s is corrupt (%r); moved to %s", self.db_path, exc, corrupt)
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(str(self.db_path) + suffix)
+            if src.exists():
+                replace_with_retry(src, Path(str(corrupt) + suffix))
+        self.open_report = OpenReport(True, str(corrupt))
+        conn = self._connect()
+        conn.executescript(_SCHEMA)
+        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)",
+                     (str(SCHEMA_VERSION),))
+        return conn
 
     def close(self) -> None:
         with self._lock:
@@ -185,7 +214,10 @@ class StateManager:
             row = self._conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
             raise KeyError(job_id)
-        return _row_to_state(row)
+        st = _row_to_state_safe(row)
+        if st is None:
+            raise KeyError(f"{job_id} (unreadable record)")
+        return st
 
     def workspace_dir(self, job_id: str) -> str:
         with self._lock:
@@ -193,6 +225,19 @@ class StateManager:
         if row is None:
             raise KeyError(job_id)
         return row[0]
+
+    def _parse_rows(self, rows: list[sqlite3.Row]) -> list[JobState]:
+        out = []
+        for r in rows:
+            st = _row_to_state_safe(r)
+            if st is None:
+                jid = r["job_id"]
+                if jid not in self.corrupt_rows:
+                    self.corrupt_rows.append(jid)
+                    log.error("job record %s is unreadable and is skipped", jid)
+                continue
+            out.append(st)
+        return out
 
     def list_jobs(self, *, batch_id: str | None = None,
                   statuses: Iterable[JobStatus] | None = None) -> list[JobState]:
@@ -213,7 +258,7 @@ class StateManager:
         sql += " ORDER BY created_at, seq"
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
-        return [_row_to_state(r) for r in rows]
+        return self._parse_rows(rows)
 
     def transition(self, job_id: str, new: JobStatus, *, stage: Stage | None = None,
                    error: ErrorInfo | None = None, output_file: str | None = None,
@@ -285,8 +330,11 @@ class StateManager:
         """Crash recovery step 1: anything that was mid-flight is INTERRUPTED."""
         now = utc_now()
         with self._tx() as c:
-            rows = c.execute("SELECT job_id FROM jobs WHERE status IN (?, ?)",
-                             (JobStatus.RUNNING.value, JobStatus.RETRY_PENDING.value)).fetchall()
+            # QUEUED rows at start-up belong to a session that ended before
+            # running them (the queue itself lives only in memory)
+            rows = c.execute("SELECT job_id FROM jobs WHERE status IN (?, ?, ?)",
+                             (JobStatus.RUNNING.value, JobStatus.RETRY_PENDING.value,
+                              JobStatus.QUEUED.value)).fetchall()
             ids = [r[0] for r in rows]
             if ids:
                 c.execute(
@@ -350,8 +398,25 @@ class StateManager:
             c.execute("DELETE FROM pending_cleanup WHERE path=?", (path,))
 
 
+def _row_to_state_safe(row: sqlite3.Row) -> JobState | None:
+    """None if the row cannot be parsed (damaged JSON / unknown enum)."""
+    try:
+        return _row_to_state(row)
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def _parse_error(raw: str | None) -> ErrorInfo | None:
+    if not raw:
+        return None
+    try:
+        return ErrorInfo(**json.loads(raw))
+    except (ValueError, TypeError):
+        return ErrorInfo("INTERNAL", "CORRUPT_RECORD", "Запис про помилку пошкоджено.", raw[:500])
+
+
 def _row_to_state(row: sqlite3.Row) -> JobState:
-    err = json.loads(row["error_json"]) if row["error_json"] else None
+    err = _parse_error(row["error_json"])
     return JobState(
         job_id=row["job_id"],
         batch_id=row["batch_id"],
@@ -363,7 +428,7 @@ def _row_to_state(row: sqlite3.Row) -> JobState:
         updated_at=row["updated_at"],
         started_at=row["started_at"],
         ended_at=row["ended_at"],
-        error=ErrorInfo(**err) if err else None,
+        error=err,
         output_file=row["output_file"],
         skipped_images=row["skipped_images"],
         resume_from_segment=row["resume_from_segment"],

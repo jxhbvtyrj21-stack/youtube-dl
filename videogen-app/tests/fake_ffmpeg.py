@@ -7,6 +7,7 @@
   child                spawn a sleeping grandchild, print its pid to stderr, then hang
   stubborn             ignore 'q' and SIGTERM, hang
   flood                write 50 MB to stderr, then normal 30
+  nospace              a few blocks, then 'No space left on device', exit 1
   slowgrow             no progress blocks, but output file keeps growing for 3 s, exit 0
 
 argv[2] (optional) = output path.
@@ -77,6 +78,9 @@ elif mode == "livelock":
     x = 0
     while time.time() < end:
         x += 1
+elif mode == "nospace":
+    sys.stderr.write("[out#0/mp4] Error writing trailer: No space left on device\n")
+    sys.exit(1)
 elif mode == "crash":
     sys.stderr.write("Error while decoding stream #0:0\n")
     sys.exit(1)

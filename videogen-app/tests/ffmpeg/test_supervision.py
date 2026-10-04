@@ -281,3 +281,11 @@ def test_disk_check(tmp_path, monkeypatch):
         check_disk(DiskEstimate(400 * 1024 * 1024, 200 * 1024 * 1024), tmp_path, tmp_path, reserve_mb=100)
     assert "Недостатньо вільного місця на диску" in ei.value.user_message
     check_disk(DiskEstimate(100 * 1024 * 1024, 100 * 1024 * 1024), tmp_path, tmp_path, reserve_mb=100)
+
+
+def test_disk_full_is_classified_as_disk_space_not_crash():
+    from videogen.core.errors import DiskSpaceError
+    run = run_ffmpeg(fake("nospace"), hard_s=30, stall_s=5, policy=FAST)
+    assert run.result.returncode == 1
+    with pytest.raises(DiskSpaceError):
+        raise_for(run, "Рендер фрагмента 1")

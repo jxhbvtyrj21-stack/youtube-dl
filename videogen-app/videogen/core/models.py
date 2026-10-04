@@ -74,7 +74,7 @@ TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({
 
 #: Single source of truth for allowed job transitions (ARCHITECTURE.md §5.1).
 ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
-    JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED}),
+    JobStatus.QUEUED: frozenset({JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.INTERRUPTED}),
     JobStatus.RUNNING: frozenset({
         JobStatus.SUCCESS, JobStatus.PARTIAL, JobStatus.FAILED, JobStatus.CANCELLED,
         JobStatus.INTERRUPTED, JobStatus.RETRY_PENDING,
