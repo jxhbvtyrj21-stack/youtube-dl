@@ -29,6 +29,8 @@ from videogen.core.state_manager import StateManager
 from videogen.ffmpeg_ctl.locator import FFmpegTools, locate
 from videogen.ffmpeg_ctl.process_manager import REGISTRY
 from videogen.providers.base import ImageGenProvider, TTSProvider
+from videogen.providers.registry import ProviderSetup, build_providers
+from videogen.utils.credentials import CredentialStore, default_store
 from videogen.storage.cleanup import remove_stale_parts, remove_tree
 from videogen.storage.workspace import WorkspaceRoot, new_batch_id
 from videogen.utils.system import InstanceLock
@@ -73,7 +75,8 @@ class EtaTracker:
 class Engine:
     def __init__(self, appdata: Path, settings: Settings, emit: Callable[[ev.Event], None], *,
                  tools: FFmpegTools | None = None, tts: TTSProvider | None = None,
-                 image_provider: ImageGenProvider | None = None, install_logging: bool = True) -> None:
+                 image_provider: ImageGenProvider | None = None, install_logging: bool = True,
+                 credential_store: CredentialStore | None = None) -> None:
         self.appdata = Path(appdata)
         self.appdata.mkdir(parents=True, exist_ok=True)
         self._lock = InstanceLock(self.appdata / "engine.lock")
@@ -92,6 +95,11 @@ class Engine:
         self.state = StateManager(self.appdata / "state.db")
         self._tools = tools
         self._tts, self._images = tts, image_provider
+        # MODE B: providers passed in explicitly (tests) are used as they are;
+        # otherwise they are built from the key store when a batch starts, so
+        # keys added while the program runs are picked up
+        self._providers_injected = tts is not None or image_provider is not None
+        self._credentials = credential_store
         self._monitor: ResourceMonitor | None = None
         self.pipeline: MediaPipeline | None = None
         self.queue: QueueManager | None = None
@@ -136,6 +144,15 @@ class Engine:
         self.queue = QueueManager(self.state, jm, self.emit,
                                   max_parallel=self.settings.concurrency.max_parallel_jobs,
                                   limits=self.settings.resources, resource_probe=self._probe)
+
+    def _refresh_providers(self) -> ProviderSetup | None:
+        if self._providers_injected or self.pipeline is None:
+            return None
+        if self._credentials is None:
+            self._credentials = default_store()
+        setup = build_providers(self.settings.providers, self._credentials)
+        self.pipeline.env.tts, self.pipeline.env.image_provider = setup.tts, setup.images
+        return setup
 
     def _probe(self) -> ResourceStatus:
         return self._monitor.probe() if self._monitor is not None else ResourceStatus(True)
@@ -227,6 +244,10 @@ class Engine:
         root = WorkspaceRoot(Path(cmd.workspace_dir or (self.appdata / "workspace")))
         root.ensure()
         self._ensure_runtime()
+        if mode is Mode.SCRIPT_PROMPTS:
+            setup = self._refresh_providers()
+            if setup is not None and not setup.ready:
+                raise InputError(setup.explanation(), code="PROVIDER_NOT_CONFIGURED")
         found = discover(inp, mode)
         if not found:
             raise InputError("У вхідній папці не знайдено матеріалів для відео.", code="NOTHING_FOUND")
@@ -262,6 +283,7 @@ class Engine:
 
     def _run_jobs(self, ids: list[str], batch_id: str) -> None:
         self._ensure_runtime()
+        self._refresh_providers()       # a resumed MODE B job may still need the services
         assert self.queue is not None
         if not self.queue.enqueue(ids):
             self.eta.reset(len(ids))

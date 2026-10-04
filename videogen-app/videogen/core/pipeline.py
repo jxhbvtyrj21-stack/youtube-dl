@@ -370,9 +370,14 @@ class MediaPipeline:
     def _generate(self, run: _Run) -> tuple[Path, list[Path]]:
         cfg, ctx = run.cfg, run.ctx
         tts, imgs = self.env.tts, self.env.image_provider
-        if tts is None or imgs is None:
-            raise InputError("Провайдер озвучки або генерації зображень не налаштований.",
-                             code="PROVIDER_NOT_CONFIGURED")
+
+        def need(provider: object) -> None:
+            # checked only when something must really be generated: a resumed
+            # job whose voice and images are already in the workspace or cache
+            # needs no service
+            if provider is None:
+                raise InputError("Провайдер озвучки або генерації зображень не налаштований.",
+                                 code="PROVIDER_NOT_CONFIGURED")
         try:
             script = Path(cfg.script_file or "").read_text(encoding="utf-8-sig")
             prompts = read_prompts(Path(cfg.prompts_file or "").read_text(encoding="utf-8-sig"))
@@ -389,6 +394,8 @@ class MediaPipeline:
         timeout = self.s.timeouts.mux_base_s * 4
         voice = run.ws.gen_dir / "voice.mp3"
         if not voice.exists():
+            need(tts)
+            assert tts is not None
             key = cache.key("tts", tts.name, {"text": "\n\n".join(scenes)})
             if not cache.get(key, ".mp3", voice):
                 tmp = voice.with_name("voice.tmp.mp3")
@@ -400,6 +407,8 @@ class MediaPipeline:
             ctx.checkpoint()
             dst = run.ws.gen_dir / f"g{i:05d}.png"
             if not dst.exists():
+                need(imgs)
+                assert imgs is not None
                 key = cache.key("img", imgs.name, {"prompt": prompt, "w": run.cfg.width, "h": run.cfg.height})
                 if not cache.get(key, ".png", dst):
                     tmp = dst.with_name(dst.stem + ".tmp.png")

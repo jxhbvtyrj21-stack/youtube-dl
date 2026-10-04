@@ -171,6 +171,22 @@ class ArchiveSettings:
 
 
 @dataclass(frozen=True)
+class ProviderSettings:
+    """MODE B services (ARCHITECTURE.md §21). API keys are NOT here: they are
+    kept in the Windows Credential Manager (utils/credentials.py)."""
+    elevenlabs_voice_id: str = field(default="21m00Tcm4TlvDq8ikWAM", metadata={"max_len": 64})
+    elevenlabs_model_id: str = field(default="eleven_multilingual_v2", metadata={"max_len": 64})
+    elevenlabs_output_format: str = field(default="mp3_44100_128", metadata=_choices(
+        "mp3_44100_128", "mp3_44100_192", "mp3_44100_96", "mp3_44100_64", "mp3_22050_32"))
+    elevenlabs_max_chars: int = field(default=4500, metadata=_rng(200, 40_000))
+    openai_image_model: str = field(default="gpt-image-1", metadata={"max_len": 64})
+    openai_image_quality: str = field(default="medium", metadata=_choices("low", "medium", "high", "auto"))
+    connect_timeout_s: float = field(default=15.0, metadata=_rng(1.0, 120.0))
+    read_timeout_s: float = field(default=180.0, metadata=_rng(5.0, 1800.0))
+    request_timeout_s: float = field(default=600.0, metadata=_rng(10.0, 7200.0))
+
+
+@dataclass(frozen=True)
 class Settings:
     video: VideoSettings = field(default_factory=VideoSettings)
     effects: EffectsSettings = field(default_factory=EffectsSettings)
@@ -184,6 +200,7 @@ class Settings:
     cleanup: CleanupSettings = field(default_factory=CleanupSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     archive: ArchiveSettings = field(default_factory=ArchiveSettings)
+    providers: ProviderSettings = field(default_factory=ProviderSettings)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

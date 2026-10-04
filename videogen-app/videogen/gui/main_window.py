@@ -23,10 +23,13 @@ from videogen import APP_NAME, __version__
 from videogen.config.settings import PathSettings, Settings, save_settings
 from videogen.core import events as ev
 from videogen.core.models import BatchState
+from videogen.gui.api_keys_dialog import ApiKeysDialog
 from videogen.gui.engine_client import EngineClient
 from videogen.gui.progress import BATCH_NAMES, ViewModel
 from videogen.gui.recovery_dialog import RecoveryDialog
 from videogen.gui.widgets import Counter, FolderPicker
+from videogen.providers.registry import build_providers
+from videogen.utils.credentials import CredentialStore, default_store
 
 log = logging.getLogger(__name__)
 
@@ -38,10 +41,12 @@ SHUTDOWN_GRACE_S = 25.0
 
 class MainWindow(QMainWindow):
     def __init__(self, appdata: Path, settings: Settings, client: EngineClient | None = None,
-                 *, autostart_engine: bool = True) -> None:
+                 *, autostart_engine: bool = True, credential_store: CredentialStore | None = None) -> None:
         super().__init__()
         self.appdata = Path(appdata)
         self.settings = settings
+        self.credentials = credential_store or default_store()
+        self._keys_dialog: ApiKeysDialog | None = None
         self.client = client or EngineClient(self.appdata, settings)
         self.model = ViewModel()
         self._shown_log_seq = 0
@@ -79,6 +84,14 @@ class MainWindow(QMainWindow):
         for w in (self.mode_a, self.mode_b):
             self._mode_group.addButton(w)
             mb.addWidget(w)
+        keys_row = QHBoxLayout()
+        self.mode_b_status = QLabel()
+        self.mode_b_status.setWordWrap(True)
+        self.btn_keys = QPushButton("Ключі API…")
+        self.btn_keys.clicked.connect(self.on_api_keys)
+        keys_row.addWidget(self.mode_b_status, 1)
+        keys_row.addWidget(self.btn_keys)
+        mb.addLayout(keys_row)
         fmt_box = QGroupBox("Формат")
         fb = QVBoxLayout(fmt_box)
         self.fmt_h = QRadioButton("Горизонтальний 16:9")
@@ -118,6 +131,7 @@ class MainWindow(QMainWindow):
         self.btn_cancel.clicked.connect(lambda: self.client.send(ev.CancelCurrentJob()))
         self.btn_open_out.clicked.connect(self.on_open_output)
         self.btn_open_log.clicked.connect(self.on_open_log)
+        self._update_mode_b_status()
 
         self.engine_banner = QWidget()
         bl = QHBoxLayout(self.engine_banner)
@@ -267,12 +281,35 @@ class MainWindow(QMainWindow):
         if Path(out).resolve() == Path(inp).resolve():
             self._warn("Папка результатів не може збігатися з вхідною папкою.")
             return
+        if self.mode_b.isChecked():
+            why = self._mode_b_problem()
+            if why:
+                self._warn(why)
+                return
         self._save_paths()
         self.model.reset_batch()
         self.client.send(ev.StartBatch(
             mode="A" if self.mode_a.isChecked() else "B",
             orientation="16:9" if self.fmt_h.isChecked() else "9:16",
             input_dir=inp, output_dir=out, workspace_dir=self.ws_pick.path()))
+
+    def _mode_b_problem(self) -> str:
+        """Why MODE B cannot start now ('' when it can). Only whether the keys
+        exist is checked here; the Engine reads the keys itself."""
+        return build_providers(self.settings.providers, self.credentials).explanation()
+
+    def _update_mode_b_status(self) -> None:
+        why = self._mode_b_problem()
+        self.mode_b_status.setText("Режим B: ключі API задано." if not why else why)
+        self.mode_b_status.setStyleSheet("" if not why else "color: #8a5a00")
+
+    def on_api_keys(self) -> None:
+        if self._keys_dialog is None:
+            self._keys_dialog = ApiKeysDialog(self.credentials, self, on_change=self._update_mode_b_status)
+            self._keys_dialog.setModal(False)
+        self._keys_dialog.refresh()
+        self._keys_dialog.show()
+        self._keys_dialog.raise_()
 
     def on_stop(self) -> None:
         self.client.send(ev.Stop())

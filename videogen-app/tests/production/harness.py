@@ -53,10 +53,10 @@ class EngineHarness:
         return self.client.pid
 
     def run_batch(self, inp: Path, out: Path, ws: Path, *, orientation: str = "16:9",
-                  timeout: float = 7200) -> list[ev.JobFinished]:
+                  timeout: float = 7200, mode: str = "A") -> list[ev.JobFinished]:
         n0 = len(self.of(ev.JobFinished))
         mark = len(self.events)
-        self.client.send(ev.StartBatch("A", orientation, str(inp), str(out), str(ws)))
+        self.client.send(ev.StartBatch(mode, orientation, str(inp), str(out), str(ws)))
 
         def done() -> bool:
             with self.lock:

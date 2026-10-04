@@ -1006,28 +1006,75 @@ Settings
 Архітектурно MODE B — це **генерувальний префікс** до MODE A:
 
 ```
-script.txt + prompts.txt ─► TTS provider ─► audio/voice.wav
-                         ─► Image provider ─► gen/i00001.png …
+script.txt + prompts.txt ─► TTS provider ─► gen/voice.mp3
+                         ─► Image provider ─► gen/g00000.png …
                          ─► (далі ідентично MODE A, починаючи з VALIDATION)
 ```
 
-* `providers/base.py`: `TTSProvider.synthesize(text, out_path, timeout) -> AudioResult`,
-  `ImageGenProvider.generate(prompt, out_path, size, timeout) -> ImageResult`.
-  Кожен виклик — з timeout, класифікацією помилок (мережа = Transient, 2 retry;
-  відмова контент-фільтра = Input, 0 retry), записом у manifest.
-* Стара програма використовувала **ElevenLabs** (озвучка) та **OpenAI**
-  (зображення). Вони реалізуються як окремі адаптери
-  `providers/elevenlabs_tts.py` і `providers/openai_images.py`, які
-  реєструються в `providers/registry.py`; Core і pipeline залежать лише від
-  інтерфейсів `base.py` і нічого не знають про конкретні сервіси.
-* Мережеві виклики — з timeout на з'єднання і читання, обмеженими retry
-  (2, з backoff 2/6 с), потоковим записом відповіді на диск, перевіркою
-  результату (аудіо → §9.2, зображення → §6) і кешуванням за хешем
-  (текст/промпт + параметри), щоб повтор job не генерував і не оплачував те
-  саме вдруге. Ключі API — у Windows Credential Manager (не у `settings.json`
-  і не в логах).
-* До окремої фази MODE B GUI показує режим, але блокує START з поясненням
-  «Провайдер не налаштований».
+* `providers/base.py` — інтерфейси `TTSProvider.synthesize(text, out_path, …)`
+  і `ImageGenProvider.generate(prompt, out_path, width, height, …)`, кеш
+  `AssetCache` за хешем (текст/промпт + провайдер з голосом і моделлю), щоб
+  повтор job не генерував і не оплачував те саме вдруге. Pipeline і Engine
+  залежать лише від цих інтерфейсів.
+* `providers/elevenlabs_tts.py` — озвучка ElevenLabs:
+  `POST /v1/text-to-speech/{voice_id}?output_format=mp3_…`, заголовок
+  `xi-api-key`, тіло `{"text", "model_id"}`, відповідь — MP3. Сценарій,
+  довший за `providers.elevenlabs_max_chars` (4500; ліміт моделі
+  `eleven_multilingual_v2` — 10 000 символів), ділиться за абзацами, потім
+  реченнями, потім словами; MP3-частини склеюються покадрово. Отримані
+  частини лежать у `gen/voice-parts/` під хешем до складання всієї озвучки,
+  тож повтор job після збою на частині N не оплачує частини 1…N−1 удруге.
+  Відповідь, що не є MP3, — `TransientError(PROVIDER_BAD_RESPONSE)`.
+* `providers/openai_images.py` — зображення OpenAI:
+  `POST /v1/images/generations`, `Authorization: Bearer`, тіло
+  `{"model", "prompt", "n": 1, "size", "quality"}`; розмір за орієнтацією
+  (`gpt-image-1`: 1536×1024 / 1024×1536; `dall-e-3`: 1792×1024 / 1024×1792,
+  з `response_format: b64_json`); `data[0].b64_json` → файл, перевірка
+  сигнатури PNG/JPEG/WEBP. Далі зображення проходить звичайну нормалізацію
+  (§6, розмитий фон для невідповідних пропорцій).
+* `providers/http.py` — спільний HTTP на `http.client` (без нових
+  залежностей), щоб програма сама володіла сокетом:
+  * timeout з'єднання (`connect_timeout_s`, 15 с), timeout кожного читання,
+    зокрема очікування, поки сервіс генерує результат (`read_timeout_s`,
+    180 с), і межа всього запиту (`request_timeout_s`, 600 с);
+  * тіло відповіді пишеться на диск блоками, не більше 64 МБ;
+  * STOP закриває сокет одразу через `CancellationToken.register` (не чекає
+    timeout читання); пауза між повторами теж переривається;
+  * до 2 повторів з паузою 2 / 6 с (або `Retry-After` сервера, не більше
+    60 с) — лише для мережевих збоїв, timeout, 5xx і 429; далі
+    `TransientError`, і job отримує звичайний бюджет повторів класу
+    TRANSIENT (§11), а кеш не дає оплатити готове вдруге;
+  * 401/403 → `InputError(PROVIDER_AUTH)`, вичерпана квота →
+    `PROVIDER_QUOTA`, відмова за правилами вмісту → `PROVIDER_REJECTED`,
+    неіснуючі голос/модель → `PROVIDER_CONFIG`, інші 4xx →
+    `PROVIDER_BAD_REQUEST`: без повторів;
+  * проксі — із системних налаштувань (`urllib.request.getproxies`:
+    змінні середовища, у Windows — реєстр).
+* Ключі API зберігаються в Windows Credential Manager поточного користувача
+  (`utils/credentials.py`, загальні облікові дані `VideoGen/elevenlabs` і
+  `VideoGen/openai`, ctypes без нових залежностей). Їх немає в
+  `settings.json`, у черзі GUI → Engine, у журналах, manifest і архіві;
+  фрагменти відповідей сервісів у повідомленнях про помилки очищаються від
+  ключів. Процес Engine читає ключі сам на початку кожного пакета MODE B,
+  тому ключ, доданий під час роботи програми, підхоплюється без
+  перезапуску. На інших ОС безпечного сховища немає, і MODE B недоступний.
+* `providers/registry.py` будує обидва провайдери з налаштувань
+  `providers` і сховища ключів. Без ключа (або з некоректним ідентифікатором
+  голосу) Engine відмовляє в старті пакета MODE B до створення будь-якого
+  job і пояснює, чого бракує.
+* GUI: кнопка «Ключі API…» відкриває немодальний діалог (зберегти /
+  видалити; збережений ключ ніколи не показується, поле очищується одразу
+  після збереження); під перемикачем режиму видно, чи задано ключі. START у
+  режимі B без ключів не надсилає команду, а пояснює, чого бракує.
+* Відновлений після аварії job MODE B, у якого озвучка і всі зображення вже
+  є у workspace або кеші, сервісів не потребує; провайдер вимагається лише
+  тоді, коли щось справді треба згенерувати.
+* Тестовий хук (лише production-набір): за `VIDEOGEN_TEST_HOOKS=1` адресу
+  сервісів можна замінити на `VIDEOGEN_TEST_PROVIDER_BASE_URL`, але лише на
+  loopback-адресу, тож ключ ніколи не піде на сторонній хост.
+* Перевірено лише проти локального імітатора сервісів, побудованого за
+  публічною документацією: справжніх ключів API в CI немає, і реальні
+  ElevenLabs / OpenAI тестами не викликаються.
 
 ---
 

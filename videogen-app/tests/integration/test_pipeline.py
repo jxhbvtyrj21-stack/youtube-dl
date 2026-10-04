@@ -362,12 +362,29 @@ def test_mode_b_with_fake_providers(dirs, engine_ctx):
     assert (tts.calls, imgs.calls) == (1, 3)
 
 
-def test_mode_b_without_provider_fails_clearly(dirs, engine_ctx):
+def test_mode_b_without_keys_is_refused_before_any_job(dirs, engine_ctx):
+    """PHASE 11: without API keys a MODE B batch does not start at all; the
+    reason names the missing keys."""
+    from videogen.utils.credentials import MemoryCredentialStore
     d = dirs["input"] / "story"
     d.mkdir()
     (d / "script.txt").write_text("Сцена.", encoding="utf-8")
     (d / "prompts.txt").write_text("x\n", encoding="utf-8")
-    eng, _ = make_engine(dirs)
+    eng, events = make_engine(dirs, credential_store=MemoryCredentialStore({"openai": "sk-only-openai"}))
+    engine_ctx["eng"] = eng
+    assert eng.start_batch(start_cmd(dirs["input"], dirs["output"], dirs["ws"], mode="B")) is None
+    [err] = events.of(ev.EngineError)
+    assert "ElevenLabs" in err.message and "Ключі API" in err.message and "sk-only" not in err.message
+    assert eng.state.list_jobs() == []
+
+
+def test_mode_b_with_an_injected_provider_missing_fails_the_job_clearly(dirs, engine_ctx):
+    d = dirs["input"] / "story"
+    d.mkdir()
+    (d / "script.txt").write_text("Сцена.", encoding="utf-8")
+    (d / "prompts.txt").write_text("x\n", encoding="utf-8")
+    from videogen.providers.fake import FakeTTS
+    eng, _ = make_engine(dirs, tts=FakeTTS())             # explicit providers: images missing
     engine_ctx["eng"] = eng
     job = run_batch(eng, dirs, mode="B")["story"]
     assert job.status is JobStatus.FAILED and job.error.code == "PROVIDER_NOT_CONFIGURED"
