@@ -119,3 +119,21 @@ GUI протягом усієї обробки: медіана **0,09 мс**, 99
 Цифри отримано в Linux-контейнері. Стрес-тести призначені для повторення на
 цільовій Windows-машині тією самою командою (`python -m pytest -m stress
 tests/stress`); результати Windows будуть додані після CI-збірки (PHASE 9).
+
+## Production stress / failure testing на Windows
+
+Окремий набір `tests/production` (15 тестів: тривалий рендер 500 і 1000
+зображень, 100 послідовних jobs, проблемні та пошкоджені зображення,
+зависання FFmpeg, аварії GUI і Engine, переповнення каналу подій,
+перезапуск і відновлення, збої бази стану, справжній малий том, перевірка
+виходу, великий архів, фінальний аудит ресурсів).
+
+```
+python -m pytest -m production tests/production --timeout=0      # quick-масштаб
+VIDEOGEN_PROD_SCALE=full python -m pytest -m production tests/production
+```
+
+На `windows-latest` набір запускає `videogen-production-stress.yml`
+(масштаб `full`, том VHD 400 МБ для тесту дискового простору, журнали
+Engine/GUI в артефакті). Результати з реальними цифрами Windows (фінальний
+прогін — 15/15) — у `STRESS_TEST_REPORT.md`.
