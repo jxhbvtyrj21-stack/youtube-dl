@@ -39,6 +39,25 @@ def _run_entry(appdata: Path) -> tuple[int, str, list[int]]:
 
 
 @pytest.mark.timeout(180)
+def test_real_entry_point_with_valid_settings_keeps_them(tmp_path):
+    """Control for gap B: a valid settings.json is used as is, not set aside."""
+    import json
+    from videogen.config.settings import Settings
+    appdata = tmp_path / "appdata"
+    appdata.mkdir()
+    data = Settings().to_dict()
+    data["video"]["fps"] = 25
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    (appdata / "settings.json").write_text(text, encoding="utf-8")
+    code, out, left = _run_entry(appdata)
+    assert code == 0 and not (appdata / "crash.log").exists(), out[-3000:]
+    assert left == []
+    assert not list(appdata.glob("settings.json.corrupt-*"))
+    assert (appdata / "settings.json").read_text(encoding="utf-8") == text
+    assert "settings:" not in out
+
+
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize("content", [
     "{ not json",                                         # syntactically broken
     '{"video": {"fps": "abc", "preset": 42}, "x": 1}',    # valid JSON, invalid values

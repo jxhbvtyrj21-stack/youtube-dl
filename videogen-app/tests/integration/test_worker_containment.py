@@ -68,6 +68,10 @@ def _kill_engine_and_watch(h: EngineHarness, workers: list[psutil.Process], watc
     return gone_after, sizes
 
 
+def _part_bytes(archive_dir: Path) -> int:
+    return sum(p.stat().st_size for p in archive_dir.glob(".*.part")) if archive_dir.exists() else 0
+
+
 def _restart_and_ignore(appdata: Path) -> list[str]:
     h = EngineHarness(appdata, small_settings()).start()
     try:
@@ -130,13 +134,18 @@ def test_engine_dies_while_archiver_is_alive(tmp_path):
         time.sleep(0.5)
         workers = _workers(h.pid)
         gone_after, sizes = _kill_engine_and_watch(h, workers, archive_dir)
+        # once the Archiver is gone nothing may write the archive any more
+        part_at_exit = _part_bytes(archive_dir)
+        time.sleep(1.0)
+        part_1s_later = _part_bytes(archive_dir)
     finally:
         h.stop()
-    grew_after_death = len(sizes) > 5 and sizes[-1] > sizes[0]
+    grew_after_death = part_1s_later != part_at_exit
     stray = [w.pid for w in workers if w.pid not in gone_after]
     zips_after_death = sorted(p.name for p in archive_dir.glob("*.zip"))
     print(f"\nH/Archiver: workers={len(workers)} gone_after_s={gone_after} part_bytes_first={sizes[:1]} "
-          f"part_bytes_last={sizes[-1:]} zips={zips_after_death}")
+          f"part_bytes_last={sizes[-1:]} part_at_exit={part_at_exit} part_1s_later={part_1s_later} "
+          f"zips={zips_after_death}")
     assert not stray, f"Archiver outlived its Engine by > 30 s: {stray}"
     assert max(gone_after.values()) <= CONTAIN_S, (gone_after, sizes[:3], sizes[-3:])
     assert not grew_after_death, "the archive kept being written after the Engine died"

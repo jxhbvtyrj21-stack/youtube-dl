@@ -45,6 +45,7 @@ jobs:
           "tests/media/test_audio_video.py::test_corrupted_bitstream_is_caught_only_by_full_decode"
           "tests/integration/test_pipeline.py::test_damaged_bitstream_after_mux_is_never_published"
           "tests/integration/test_pipeline.py::test_disk_full_while_archiving_pauses_batch_and_keeps_video_linked"
+          "tests/ffmpeg/test_job_object_windows.py"
 
   build:
     name: Build EXE and self-test
