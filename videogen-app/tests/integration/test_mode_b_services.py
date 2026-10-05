@@ -213,3 +213,62 @@ def test_stop_during_generation_cancels_promptly(svc, dirs):
     assert job.status is JobStatus.CANCELLED
     assert stopped_in < 10, stopped_in                     # not the 180 s read timeout
     assert not list(dirs["output"].glob("*.mp4"))
+
+
+@pytest.mark.timeout(600)
+def test_resume_after_generation_needs_no_keys_and_no_service(svc, dirs, monkeypatch):
+    """OPEN VALIDATION GAP PHASE 11: a MODE B job whose voice and images are
+    already complete in the workspace is interrupted; the program starts
+    again WITHOUT any API key; Resume finishes the job (SUCCESS) from the
+    workspace and the services receive no request at all."""
+    from videogen.core import pipeline as pl
+    from videogen.core.models import RecoveryAction
+    _story(dirs["input"])
+    reached = threading.Event()
+    gate = {"on": True}
+    real_audio = pl.MediaPipeline._audio
+
+    def audio_after_generation(self, run, src):
+        # generation is complete when the AUDIO stage begins: stop here once
+        if gate["on"]:
+            reached.set()
+            for _ in range(6000):                    # bounded; ends when the Engine interrupts the job
+                if run.ctx.token.wait(0.1):
+                    break
+            run.ctx.token.raise_if_cancelled()
+        return real_audio(self, run, src)
+    monkeypatch.setattr(pl.MediaPipeline, "_audio", audio_after_generation)
+
+    r = _Run(dirs)                                   # keys present for the first run
+    b = r.eng.start_batch(start_cmd(dirs["input"], dirs["output"], dirs["ws"], mode="B"))
+    assert b is not None
+    try:
+        assert reached.wait(120), "generation did not complete"
+        [job] = r.eng.state.list_jobs(batch_id=b)
+        gen = Path(r.eng.state.workspace_dir(job.job_id)) / "gen"
+        generated = sorted(p.name for p in gen.iterdir() if p.is_file())
+        calls_before = len(svc.calls)
+    finally:
+        r.eng.shutdown(interrupt=True)              # the program goes away mid-job
+    assert generated == ["g00000.png", "g00001.png", "g00002.png", "voice.mp3"], generated
+    assert calls_before == 1 + len(PROMPTS)
+    gate["on"] = False
+    import shutil
+    shutil.rmtree(dirs["appdata"] / "cache")         # only the workspace may serve the resume
+
+    events = Events()
+    eng = Engine(dirs["appdata"], _settings(), events, credential_store=MemoryCredentialStore())   # no keys
+    try:
+        [interrupted] = eng.startup()
+        assert interrupted.status is JobStatus.INTERRUPTED
+        eng.recover(interrupted.job_id, RecoveryAction.RESUME)
+        assert eng.wait_idle(300)
+        done = eng.state.get_job(interrupted.job_id)
+        providers = (eng.pipeline.env.tts, eng.pipeline.env.image_provider)
+    finally:
+        eng.shutdown()
+    assert providers == (None, None)                 # the resume really ran without any provider
+    assert done.status is JobStatus.SUCCESS, done.error
+    assert Path(done.output_file).is_file() and probe_media(F.FFPROBE, Path(done.output_file),
+                                                            TimeoutPolicy()).video_frames > 0
+    assert len(svc.calls) == calls_before            # not a single new request to ElevenLabs / OpenAI

@@ -97,16 +97,27 @@ def test_response_size_is_limited(svc, tmp_path):
 
 
 def test_connection_refused_is_transient(tmp_path):
+    """Contract: a service that cannot be reached is a transient failure,
+    retried exactly ``retries`` times with the policy's pauses, then given
+    up. Which transient code it is depends on the OS: Linux refuses at once
+    (PROVIDER_NETWORK), Windows retries the SYN internally and the connect
+    timeout fires first (PROVIDER_TIMEOUT, Windows CI e96ad07)."""
     import socket
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
+    sleeps: list[float] = []
+    t0 = time.monotonic()
     with pytest.raises(TransientError) as ei:
         request("POST", f"http://127.0.0.1:{port}/x", service="Тест", headers={}, body=b"{}",
-                out_path=tmp_path / "o", policy=HttpPolicy(connect_timeout_s=1, retries=1, backoff_s=(0.01,)),
-                token=CancellationToken())
-    assert ei.value.code == "PROVIDER_NETWORK"
+                out_path=tmp_path / "o", token=CancellationToken(),
+                policy=HttpPolicy(connect_timeout_s=1, retries=2, backoff_s=(0.01, 0.02)),
+                sleep=lambda d: sleeps.append(d) or False)
+    assert ei.value.code in ("PROVIDER_NETWORK", "PROVIDER_TIMEOUT")
+    assert sleeps == [0.01, 0.02]                    # 3 attempts, the policy's pauses, then it stops
+    assert time.monotonic() - t0 < 3 * 1 + 2        # every attempt bounded by the connect timeout
+    assert not (tmp_path / "o").exists()
 
 
 def test_stop_interrupts_a_request_waiting_for_the_service(svc, tmp_path):
@@ -118,6 +129,27 @@ def test_stop_interrupts_a_request_waiting_for_the_service(svc, tmp_path):
         _post(svc, tmp_path, token=token, policy=HttpPolicy(connect_timeout_s=2, read_timeout_s=30, retries=2))
     assert time.monotonic() - t0 < 3                  # not the 30 s read timeout
     assert not (tmp_path / "out.bin").exists()
+
+
+def test_stop_returns_promptly_even_if_the_socket_cannot_be_woken(svc, tmp_path, monkeypatch):
+    """The guarantee must not depend on how the OS treats a socket closed
+    under a blocked read (Windows does not wake it). With closing disabled
+    entirely, STOP still returns at once; the abandoned exchange ends by its
+    own read timeout and removes its partial file."""
+    from videogen.providers import http as h
+    monkeypatch.setattr(h, "_abort", lambda conn: None)
+    svc.push("tts", Behaviour("hang", seconds=4))
+    token = CancellationToken()
+    threading.Timer(0.5, token.cancel).start()
+    t0 = time.monotonic()
+    with pytest.raises(JobCancelledError):
+        _post(svc, tmp_path, token=token, policy=HttpPolicy(connect_timeout_s=2, read_timeout_s=30, retries=2))
+    assert time.monotonic() - t0 < 3
+    deadline = time.monotonic() + 15                 # the server answers after 4 s; the worker then exits
+    while (tmp_path / "out.bin").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not (tmp_path / "out.bin").exists()
+    assert len(svc.calls) == 1                       # a cancelled request is never repeated
 
 
 def test_stop_interrupts_the_pause_between_retries(svc, tmp_path):

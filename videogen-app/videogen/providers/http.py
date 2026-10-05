@@ -27,6 +27,7 @@ import logging
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from videogen.core.errors import InputError, JobCancelledError, TransientError, 
 log = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
+POLL_S = 0.1                     # how often a waiting caller checks for STOP
 SNIPPET = 2048
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _KEY_PATTERN = re.compile(r"(sk[-_][A-Za-z0-9_\-*]{4,}|[A-Fa-f0-9]{32,})")   # OpenAI / ElevenLabs key shapes
@@ -131,25 +133,31 @@ def _connection(url: str, policy: HttpPolicy) -> tuple[http.client.HTTPConnectio
     return http.client.HTTPConnection(p.hostname or "", pport, timeout=policy.connect_timeout_s), url, extra
 
 
-def _shutdown(conn: http.client.HTTPConnection) -> None:
+def _abort(conn: http.client.HTTPConnection) -> None:
+    """Called on STOP from another thread. ``shutdown`` wakes a blocked read
+    on POSIX; ``close`` (closesocket) is what cancels it on Windows. Neither
+    is relied on for the caller's promptness — see :func:`_run_attempt`."""
     sock = conn.sock
-    if sock is not None:
+    if sock is None:
+        return
+    for op in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
         try:
-            sock.shutdown(socket.SHUT_RDWR)
+            op()
         except OSError:
             log.debug("socket already closed")
 
 
-def _attempt(method: str, url: str, headers: dict[str, str], body: bytes | None, out_path: Path,
-             policy: HttpPolicy, token: CancellationToken) -> tuple[int, dict[str, str], int]:
-    conn, path, extra = _connection(url, policy)
-    handle = token.register(lambda: _shutdown(conn))
+def _attempt(conn: http.client.HTTPConnection, path: str, method: str, headers: dict[str, str],
+             body: bytes | None, out_path: Path, policy: HttpPolicy,
+             token: CancellationToken) -> tuple[int, dict[str, str], int]:
+    """The network exchange itself; runs in its own thread (``_run_attempt``)."""
     deadline = time.monotonic() + policy.total_timeout_s
+    completed = False
     try:
         conn.connect()
         if conn.sock is not None:
             conn.sock.settimeout(policy.read_timeout_s)
-        conn.request(method, path, body=body, headers={**headers, **extra})
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         hdrs = {k.lower(): v for k, v in resp.getheaders()}
         size = 0
@@ -161,7 +169,7 @@ def _attempt(method: str, url: str, headers: dict[str, str], body: bytes | None,
                 if time.monotonic() > deadline:
                     raise socket.timeout("total request deadline exceeded")
                 block = resp.read(CHUNK)
-                if not block:
+                if not block or token.cancelled:
                     break
                 size += len(block)
                 if size > policy.max_bytes:
@@ -171,10 +179,49 @@ def _attempt(method: str, url: str, headers: dict[str, str], body: bytes | None,
         declared = hdrs.get("content-length")
         if not token.cancelled and declared and declared.isdigit() and int(declared) != size:
             raise http.client.IncompleteRead(b"", int(declared) - size)
+        completed = not token.cancelled
         return resp.status, hdrs, size
     finally:
-        token.unregister(handle)
         conn.close()
+        if not completed and token.cancelled:
+            out_path.unlink(missing_ok=True)               # an abandoned exchange leaves nothing behind
+
+
+def _run_attempt(method: str, url: str, headers: dict[str, str], body: bytes | None, out_path: Path,
+                 policy: HttpPolicy, token: CancellationToken) -> tuple[int, dict[str, str], int]:
+    """Run one exchange so that STOP always returns at once, on every OS.
+
+    The exchange runs in a worker thread; this thread only waits, in steps of
+    ``POLL_S``, checking the cancellation token. A blocking socket read cannot
+    be relied on to wake up when the socket is shut down from another thread
+    (it does not on Windows — Windows CI, e96ad07), so the caller never sits
+    in one. On STOP the socket is closed (the worker then fails or times out
+    within ``read_timeout_s`` and removes its partial file) and
+    ``JobCancelledError`` is raised immediately."""
+    conn, path, extra = _connection(url, policy)
+    result: dict[str, object] = {}
+
+    def work() -> None:
+        try:
+            result["value"] = _attempt(conn, path, method, {**headers, **extra}, body, out_path, policy, token)
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiting thread as is
+            result["error"] = exc
+
+    handle = token.register(lambda: _abort(conn))
+    worker = threading.Thread(target=work, name="provider-http", daemon=True)
+    try:
+        worker.start()
+        while worker.is_alive() and not token.cancelled:
+            worker.join(POLL_S)
+    finally:
+        token.unregister(handle)
+    if token.cancelled:
+        _abort(conn)
+        worker.join(POLL_S)
+        raise JobCancelledError()
+    if "error" in result:
+        raise result["error"]  # type: ignore[misc]
+    return result["value"]  # type: ignore[return-value]
 
 
 def request(method: str, url: str, *, service: str, headers: dict[str, str], body: bytes | None,
@@ -189,7 +236,7 @@ def request(method: str, url: str, *, service: str, headers: dict[str, str], bod
         token.raise_if_cancelled()
         pause: float | None = None
         try:
-            status, hdrs, size = _attempt(method, url, headers, body, out_path, policy, token)
+            status, hdrs, size = _run_attempt(method, url, headers, body, out_path, policy, token)
         except InputError:
             out_path.unlink(missing_ok=True)
             raise
