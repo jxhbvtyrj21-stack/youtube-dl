@@ -261,7 +261,7 @@ GUI під навантаженням. Результати й таблиці �
 
 ---
 
-## PHASE 9 — Packaging і документація ⬜
+## PHASE 9 — Packaging і документація ✅ (CLOSED)
 
 * PyInstaller onedir, `videogen.spec`, маніфест (`longPathAware`, DPI aware),
   вбудовані ffmpeg/ffprobe (LGPL/GPL-збірка — ліцензії в `third_party/`);
@@ -277,7 +277,7 @@ CI-збірку на `windows-latest`. Поки вона не пройде, кр
 
 ---
 
-## PHASE 10 — Фінальний review стабільності ⬜
+## PHASE 10 — Фінальний review стабільності ✅ (CLOSED)
 
 Окремий прохід за чек-листом ТЗ §52 з фіксацією знахідок і виправлень у
 `REVIEW.md`.
