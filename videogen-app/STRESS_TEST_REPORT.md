@@ -315,6 +315,8 @@ VideoGen має власні CI: `videogen-windows.yml` (502 тести на c44
 * У тесті 9 (прогони 3 і 4) вбивство не потрапило точно в проміжок між SUCCESS і
   видаленням workspace. Цей сценарій детерміновано перевіряє інтеграційний
   тест `test_crash_between_final_status_and_cleanup_does_not_leak_workspace`.
-* MODE B (ElevenLabs / OpenAI) у серії не перевірявся: реальні адаптери ще не
-  підключено.
+* MODE B (ElevenLabs / OpenAI) у прогонах 1–4 цього звіту не перевірявся:
+  адаптерів тоді ще не було. Їх реалізовано пізніше, у PHASE 11
+  (`IMPLEMENTATION_PLAN.md`); production-тест 15 перевіряє MODE B лише з
+  локальним імітатором сервісів, справжні API не викликалися.
 * Ручного Retry для FAILED-завдань у програмі немає; серія його не перевіряє.

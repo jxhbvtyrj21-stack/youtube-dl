@@ -116,9 +116,12 @@ GUI протягом усієї обробки: медіана **0,09 мс**, 99
 
 ### Обмеження вимірювань
 
-Цифри отримано в Linux-контейнері. Стрес-тести призначені для повторення на
-цільовій Windows-машині тією самою командою (`python -m pytest -m stress
-tests/stress`); результати Windows будуть додані після CI-збірки (PHASE 9).
+Цифри отримано в Linux-контейнері. Набір `tests/stress` у Windows CI не
+запускається (`-m stress` виключено за замовчуванням); його можна повторити
+на Windows тією самою командою (`python -m pytest -m stress tests/stress`).
+Результати навантаження на справжній Windows отримано окремою
+production-серією (`tests/production`, `windows-latest`) — див.
+`STRESS_TEST_REPORT.md`.
 
 ## MODE B (PHASE 11)
 
