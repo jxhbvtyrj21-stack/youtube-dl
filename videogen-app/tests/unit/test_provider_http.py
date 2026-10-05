@@ -120,36 +120,57 @@ def test_connection_refused_is_transient(tmp_path):
     assert not (tmp_path / "o").exists()
 
 
+def _client_threads(before: set) -> list[str]:
+    """Threads started since ``before`` that are not the mock server's request handlers."""
+    return [t.name for t in threading.enumerate()
+            if t not in before and t.is_alive() and "process_request_thread" not in t.name]
+
+
+def _client_connections(port: int) -> list:
+    import psutil
+    return [c for c in psutil.Process().net_connections(kind="tcp")
+            if c.raddr and c.raddr.port == port and c.status == psutil.CONN_ESTABLISHED]
+
+
+def _stop_while_waiting(svc, tmp_path):
+    """STOP 0.5 s into a request the service never answers in time; returns
+    what holds at the moment the call returns."""
+    svc.push("tts", Behaviour("hang", seconds=6))
+    port = int(svc.url.rsplit(":", 1)[1])
+    before = set(threading.enumerate())
+    token = CancellationToken()
+    threading.Timer(0.5, token.cancel).start()
+    t0 = time.monotonic()
+    with pytest.raises(JobCancelledError):
+        _post(svc, tmp_path, token=token, policy=HttpPolicy(connect_timeout_s=2, read_timeout_s=30, retries=2))
+    return {"returned_s": time.monotonic() - t0, "threads": _client_threads(before),
+            "connections": _client_connections(port), "partial_file": (tmp_path / "out.bin").exists(),
+            "requests": len(svc.calls)}
+
+
 def test_stop_interrupts_a_request_waiting_for_the_service(svc, tmp_path):
-    svc.push("tts", Behaviour("hang", seconds=20))
-    token = CancellationToken()
-    threading.Timer(0.5, token.cancel).start()
-    t0 = time.monotonic()
-    with pytest.raises(JobCancelledError):
-        _post(svc, tmp_path, token=token, policy=HttpPolicy(connect_timeout_s=2, read_timeout_s=30, retries=2))
-    assert time.monotonic() - t0 < 3                  # not the 30 s read timeout
-    assert not (tmp_path / "out.bin").exists()
+    at_return = _stop_while_waiting(svc, tmp_path)
+    assert at_return["returned_s"] < 3, at_return            # not the 30 s read timeout
+    assert at_return["threads"] == [], at_return             # no network thread left behind
+    assert at_return["connections"] == [], at_return         # the socket is already closed
+    assert not at_return["partial_file"] and at_return["requests"] == 1
 
 
-def test_stop_returns_promptly_even_if_the_socket_cannot_be_woken(svc, tmp_path, monkeypatch):
-    """The guarantee must not depend on how the OS treats a socket closed
-    under a blocked read (Windows does not wake it). With closing disabled
-    entirely, STOP still returns at once; the abandoned exchange ends by its
-    own read timeout and removes its partial file."""
-    from videogen.providers import http as h
-    monkeypatch.setattr(h, "_abort", lambda conn: None)
-    svc.push("tts", Behaviour("hang", seconds=4))
-    token = CancellationToken()
-    threading.Timer(0.5, token.cancel).start()
-    t0 = time.monotonic()
-    with pytest.raises(JobCancelledError):
-        _post(svc, tmp_path, token=token, policy=HttpPolicy(connect_timeout_s=2, read_timeout_s=30, retries=2))
-    assert time.monotonic() - t0 < 3
-    deadline = time.monotonic() + 15                 # the server answers after 4 s; the worker then exits
-    while (tmp_path / "out.bin").exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert not (tmp_path / "out.bin").exists()
-    assert len(svc.calls) == 1                       # a cancelled request is never repeated
+def test_stop_lifecycle_does_not_depend_on_closing_the_socket(svc, tmp_path, monkeypatch):
+    """Imitates Windows, where closing a socket does not wake a read blocked
+    on it (Windows CI, e96ad07): close/shutdown are made to do nothing. STOP
+    must still end the exchange in the calling thread — no thread alive, file
+    removed — before the call returns."""
+    import socket
+    monkeypatch.setattr(socket.socket, "shutdown", lambda self, how: None)
+    monkeypatch.setattr(socket.socket, "close", lambda self: None)
+    try:
+        at_return = _stop_while_waiting(svc, tmp_path)
+    finally:
+        monkeypatch.undo()
+    assert at_return["returned_s"] < 3, at_return
+    assert at_return["threads"] == [], at_return
+    assert not at_return["partial_file"] and at_return["requests"] == 1
 
 
 def test_stop_interrupts_the_pause_between_retries(svc, tmp_path):

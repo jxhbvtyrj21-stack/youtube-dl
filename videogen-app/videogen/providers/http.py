@@ -1,14 +1,23 @@
 """Bounded HTTP for MODE B providers (ARCHITECTURE.md §21).
 
-``http.client`` from the standard library (no new dependency) because the
-caller must own the socket: STOP shuts it down at once through the
-cancellation token, and the read timeout is set separately from the connect
-timeout. Proxies come from the system settings (``urllib.request.getproxies``:
-environment variables, and the registry on Windows).
+``http.client`` from the standard library (no new dependency) parses HTTP,
+but the program owns every socket operation: the socket is non-blocking and
+each wait (connect, TLS handshake, send, every read) happens in steps of
+``POLL_S`` that check the cancellation token and the deadlines. STOP is
+therefore seen within ``POLL_S`` in the thread that runs the request, the
+socket is closed there and the partial file removed, and only then does the
+caller get ``JobCancelledError``. No background thread exists and nothing
+depends on how the OS treats a socket closed under a blocked read (Windows
+does not wake it — Windows CI, e96ad07). The one call that cannot be
+interrupted is the host name lookup (``getaddrinfo``), bounded by the OS
+resolver. Proxies come from the system settings
+(``urllib.request.getproxies``: environment variables, and the registry on
+Windows).
 
 Every request:
-  * connect timeout; a timeout on every socket read (including the wait for
-    the service to generate the result); a deadline for the whole request;
+  * connect timeout; at most ``read_timeout_s`` without any data (including
+    the wait for the service to generate the result); a deadline for the
+    whole request;
   * response body streamed to a file, never more than ``max_bytes``;
   * at most ``retries`` repetitions with the pauses ``backoff_s`` (or the
     server's ``Retry-After``, capped) — only for retryable failures;
@@ -22,12 +31,14 @@ from __future__ import annotations
 
 import base64
 import email.utils
+import errno
 import http.client
+import io
 import logging
 import re
+import select
 import socket
 import ssl
-import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -41,7 +52,7 @@ from videogen.core.errors import InputError, JobCancelledError, TransientError, 
 log = logging.getLogger(__name__)
 
 CHUNK = 64 * 1024
-POLL_S = 0.1                     # how often a waiting caller checks for STOP
+POLL_S = 0.1                     # longest single wait on a socket: STOP is seen this soon
 SNIPPET = 2048
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _KEY_PATTERN = re.compile(r"(sk[-_][A-Za-z0-9_\-*]{4,}|[A-Fa-f0-9]{32,})")   # OpenAI / ElevenLabs key shapes
@@ -106,7 +117,152 @@ def retry_after_s(value: str | None, cap: float) -> float | None:
     return max(0.0, min(secs, cap))
 
 
-def _connection(url: str, policy: HttpPolicy) -> tuple[http.client.HTTPConnection, str, dict[str, str]]:
+class _Cancelled(Exception):
+    """STOP seen inside a socket wait; becomes JobCancelledError in request()."""
+
+
+def _wait(sock: socket.socket, *, write: bool, token: CancellationToken, deadline: float, what: str) -> None:
+    """Wait until ``sock`` is ready, in steps of POLL_S, checking STOP and the deadline."""
+    for _ in range(int(max(0.0, deadline - time.monotonic()) / POLL_S) + 2):
+        if token.cancelled:
+            raise _Cancelled()
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        step = min(POLL_S, left)
+        r, w, x = select.select([] if write else [sock], [sock] if write else [], [sock], step)
+        if r or w or x:
+            return
+    if token.cancelled:
+        raise _Cancelled()
+    raise socket.timeout(f"{what} timed out")
+
+
+class _PollingSocket:
+    """A non-blocking socket whose blocking-style methods (used by
+    http.client) wait only through :func:`_wait`."""
+
+    def __init__(self, raw: socket.socket, token: CancellationToken, policy: HttpPolicy) -> None:
+        raw.setblocking(False)
+        self.raw, self.token, self.policy = raw, token, policy
+
+    def __getattr__(self, name: str) -> object:          # setsockopt, fileno, ...
+        return getattr(self.raw, name)
+
+    def recv_into(self, buf: memoryview | bytearray) -> int:
+        deadline = time.monotonic() + self.policy.read_timeout_s
+        for _ in range(int(self.policy.read_timeout_s / POLL_S) + 3):
+            if self.token.cancelled:
+                raise _Cancelled()
+            try:
+                return self.raw.recv_into(buf)
+            except (BlockingIOError, ssl.SSLWantReadError):
+                _wait(self.raw, write=False, token=self.token, deadline=deadline, what="read")
+            except ssl.SSLWantWriteError:
+                _wait(self.raw, write=True, token=self.token, deadline=deadline, what="read")
+        raise socket.timeout("read timed out")
+
+    def sendall(self, data: bytes) -> None:
+        view = memoryview(data)
+        deadline = time.monotonic() + self.policy.read_timeout_s
+        for _ in range(len(view) + int(self.policy.read_timeout_s / POLL_S) + 3):
+            if not view:
+                return
+            if self.token.cancelled:
+                raise _Cancelled()
+            try:
+                view = view[self.raw.send(view):]
+            except (BlockingIOError, ssl.SSLWantWriteError):
+                _wait(self.raw, write=True, token=self.token, deadline=deadline, what="send")
+            except ssl.SSLWantReadError:
+                _wait(self.raw, write=False, token=self.token, deadline=deadline, what="send")
+        if view:
+            raise socket.timeout("send timed out")
+
+    def makefile(self, mode: str = "rb", *args: object, **kwargs: object) -> io.BufferedReader:
+        return io.BufferedReader(_PollingReader(self))
+
+    def close(self) -> None:
+        self.raw.close()
+
+
+class _PollingReader(io.RawIOBase):
+    """The response stream of http.client over a :class:`_PollingSocket`;
+    closing it does not close the socket (as with ``socket.makefile``)."""
+
+    def __init__(self, sock: _PollingSocket) -> None:
+        self._sock = sock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buf: memoryview | bytearray) -> int:  # type: ignore[override]
+        return self._sock.recv_into(buf)
+
+
+def _polled_connect(address: tuple[str, int], token: CancellationToken, policy: HttpPolicy) -> _PollingSocket:
+    host, port = address
+    infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)   # not interruptible: OS resolver
+    deadline = time.monotonic() + policy.connect_timeout_s
+    last: OSError | None = None
+    for family, kind, proto, _, sockaddr in infos:
+        raw = socket.socket(family, kind, proto)
+        try:
+            raw.setblocking(False)
+            err = raw.connect_ex(sockaddr)
+            if err not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, getattr(errno, "WSAEWOULDBLOCK", -1)):
+                raise OSError(err, f"connect failed ({err})")
+            if err:
+                _wait(raw, write=True, token=token, deadline=deadline, what="connect")
+                err = raw.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if err:
+                    raise OSError(err, f"connect failed ({err})")
+            return _PollingSocket(raw, token, policy)
+        except _Cancelled:
+            raw.close()
+            raise
+        except OSError as exc:
+            raw.close()
+            last = exc
+    raise last or OSError("no address to connect to")
+
+
+class _HTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, *, token: CancellationToken, policy: HttpPolicy) -> None:
+        super().__init__(host, port, timeout=policy.connect_timeout_s)
+        self._create_connection = lambda address, *_: _polled_connect(address, token, policy)
+
+
+class _HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, *, token: CancellationToken, policy: HttpPolicy,
+                 context: ssl.SSLContext) -> None:
+        super().__init__(host, port, timeout=policy.connect_timeout_s, context=context)
+        self._create_connection = lambda address, *_: _polled_connect(address, token, policy)
+        self._token, self._policy = token, policy
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)            # TCP (+ proxy CONNECT), polled
+        plain = self.sock
+        assert isinstance(plain, _PollingSocket)
+        tls = self._context.wrap_socket(plain.raw, server_hostname=self._tunnel_host or self.host,
+                                        do_handshake_on_connect=False)
+        tls.setblocking(False)
+        deadline = time.monotonic() + self._policy.connect_timeout_s
+        for _ in range(int(self._policy.connect_timeout_s / POLL_S) + 3):
+            try:
+                tls.do_handshake()
+                break
+            except ssl.SSLWantReadError:
+                _wait(tls, write=False, token=self._token, deadline=deadline, what="TLS handshake")
+            except ssl.SSLWantWriteError:
+                _wait(tls, write=True, token=self._token, deadline=deadline, what="TLS handshake")
+        else:
+            raise socket.timeout("TLS handshake timed out")
+        self.sock = _PollingSocket(tls, self._token, self._policy)
+
+
+def _connection(url: str, policy: HttpPolicy,
+                token: CancellationToken) -> tuple[http.client.HTTPConnection, str, dict[str, str]]:
     u = urlsplit(url)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise InputError("Некоректна адреса сервісу.", code="PROVIDER_BAD_URL", detail=url)
@@ -118,46 +274,31 @@ def _connection(url: str, policy: HttpPolicy) -> tuple[http.client.HTTPConnectio
         proxy = urllib.request.getproxies().get(u.scheme)
     ctx = ssl.create_default_context()
     if not proxy:
-        cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
-        kw = {"context": ctx} if u.scheme == "https" else {}
-        return cls(host, port, timeout=policy.connect_timeout_s, **kw), path, extra
+        if u.scheme == "https":
+            return _HTTPSConnection(host, port, token=token, policy=policy, context=ctx), path, extra
+        return _HTTPConnection(host, port, token=token, policy=policy), path, extra
     p = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
     if p.username:
         cred = f"{unquote(p.username)}:{unquote(p.password or '')}".encode()
         extra["Proxy-Authorization"] = "Basic " + base64.b64encode(cred).decode()
     pport = p.port or (443 if p.scheme == "https" else 80)
     if u.scheme == "https":
-        conn = http.client.HTTPSConnection(p.hostname or "", pport, timeout=policy.connect_timeout_s, context=ctx)
+        conn = _HTTPSConnection(p.hostname or "", pport, token=token, policy=policy, context=ctx)
         conn.set_tunnel(host, port, headers=dict(extra))
         return conn, path, {}
-    return http.client.HTTPConnection(p.hostname or "", pport, timeout=policy.connect_timeout_s), url, extra
+    return _HTTPConnection(p.hostname or "", pport, token=token, policy=policy), url, extra
 
 
-def _abort(conn: http.client.HTTPConnection) -> None:
-    """Called on STOP from another thread. ``shutdown`` wakes a blocked read
-    on POSIX; ``close`` (closesocket) is what cancels it on Windows. Neither
-    is relied on for the caller's promptness — see :func:`_run_attempt`."""
-    sock = conn.sock
-    if sock is None:
-        return
-    for op in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
-        try:
-            op()
-        except OSError:
-            log.debug("socket already closed")
-
-
-def _attempt(conn: http.client.HTTPConnection, path: str, method: str, headers: dict[str, str],
-             body: bytes | None, out_path: Path, policy: HttpPolicy,
-             token: CancellationToken) -> tuple[int, dict[str, str], int]:
-    """The network exchange itself; runs in its own thread (``_run_attempt``)."""
+def _attempt(method: str, url: str, headers: dict[str, str], body: bytes | None, out_path: Path,
+             policy: HttpPolicy, token: CancellationToken) -> tuple[int, dict[str, str], int]:
+    """One exchange, in the calling thread. Every socket wait is a
+    cancellation point; on any exit the socket is closed and, unless the
+    exchange completed, the partial file removed."""
+    conn, path, extra = _connection(url, policy, token)
     deadline = time.monotonic() + policy.total_timeout_s
     completed = False
     try:
-        conn.connect()
-        if conn.sock is not None:
-            conn.sock.settimeout(policy.read_timeout_s)
-        conn.request(method, path, body=body, headers=headers)
+        conn.request(method, path, body=body, headers={**headers, **extra})
         resp = conn.getresponse()
         hdrs = {k.lower(): v for k, v in resp.getheaders()}
         size = 0
@@ -165,11 +306,11 @@ def _attempt(conn: http.client.HTTPConnection, path: str, method: str, headers: 
         with open(out_path, "wb") as fh:
             for _ in range(policy.max_bytes // CHUNK + 2):     # bounded by max_bytes
                 if token.cancelled:
-                    break
+                    raise _Cancelled()
                 if time.monotonic() > deadline:
                     raise socket.timeout("total request deadline exceeded")
                 block = resp.read(CHUNK)
-                if not block or token.cancelled:
+                if not block:
                     break
                 size += len(block)
                 if size > policy.max_bytes:
@@ -177,51 +318,14 @@ def _attempt(conn: http.client.HTTPConnection, path: str, method: str, headers: 
                                      detail=f"> {policy.max_bytes} bytes")
                 fh.write(block)
         declared = hdrs.get("content-length")
-        if not token.cancelled and declared and declared.isdigit() and int(declared) != size:
+        if declared and declared.isdigit() and int(declared) != size:
             raise http.client.IncompleteRead(b"", int(declared) - size)
-        completed = not token.cancelled
+        completed = True
         return resp.status, hdrs, size
     finally:
         conn.close()
-        if not completed and token.cancelled:
-            out_path.unlink(missing_ok=True)               # an abandoned exchange leaves nothing behind
-
-
-def _run_attempt(method: str, url: str, headers: dict[str, str], body: bytes | None, out_path: Path,
-                 policy: HttpPolicy, token: CancellationToken) -> tuple[int, dict[str, str], int]:
-    """Run one exchange so that STOP always returns at once, on every OS.
-
-    The exchange runs in a worker thread; this thread only waits, in steps of
-    ``POLL_S``, checking the cancellation token. A blocking socket read cannot
-    be relied on to wake up when the socket is shut down from another thread
-    (it does not on Windows — Windows CI, e96ad07), so the caller never sits
-    in one. On STOP the socket is closed (the worker then fails or times out
-    within ``read_timeout_s`` and removes its partial file) and
-    ``JobCancelledError`` is raised immediately."""
-    conn, path, extra = _connection(url, policy)
-    result: dict[str, object] = {}
-
-    def work() -> None:
-        try:
-            result["value"] = _attempt(conn, path, method, {**headers, **extra}, body, out_path, policy, token)
-        except BaseException as exc:  # noqa: BLE001 - handed to the waiting thread as is
-            result["error"] = exc
-
-    handle = token.register(lambda: _abort(conn))
-    worker = threading.Thread(target=work, name="provider-http", daemon=True)
-    try:
-        worker.start()
-        while worker.is_alive() and not token.cancelled:
-            worker.join(POLL_S)
-    finally:
-        token.unregister(handle)
-    if token.cancelled:
-        _abort(conn)
-        worker.join(POLL_S)
-        raise JobCancelledError()
-    if "error" in result:
-        raise result["error"]  # type: ignore[misc]
-    return result["value"]  # type: ignore[return-value]
+        if not completed:
+            out_path.unlink(missing_ok=True)
 
 
 def request(method: str, url: str, *, service: str, headers: dict[str, str], body: bytes | None,
@@ -236,7 +340,9 @@ def request(method: str, url: str, *, service: str, headers: dict[str, str], bod
         token.raise_if_cancelled()
         pause: float | None = None
         try:
-            status, hdrs, size = _run_attempt(method, url, headers, body, out_path, policy, token)
+            status, hdrs, size = _attempt(method, url, headers, body, out_path, policy, token)
+        except _Cancelled as exc:
+            raise JobCancelledError() from exc
         except InputError:
             out_path.unlink(missing_ok=True)
             raise
